@@ -11,7 +11,7 @@ import re
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .api import admin, analyze, routes
@@ -247,7 +247,12 @@ async def request_logger(request: Request, call_next):
             if not user or not bool(getattr(user, "is_admin", False)):
                 return Response(content='{"detail":"仅管理员可执行此操作"}', media_type="application/json", status_code=403)
 
-    return await call_next(request)
+    response = await call_next(request)
+    if path.startswith("/admin") or path.startswith("/assets") or path in {"/", "/login"}:
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 
 app.include_router(routes.router)
@@ -260,7 +265,18 @@ app.include_router(browser_extension_bridge.router)
 static_dir = STATIC_DIR
 assets_dir = static_dir / "assets"
 assets_dir.mkdir(parents=True, exist_ok=True)
-app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+
+class NoCacheStaticFiles(StaticFiles):
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+
+app.mount("/assets", NoCacheStaticFiles(directory=str(assets_dir)), name="assets")
 
 
 def _page(path: Path) -> Response:
@@ -277,6 +293,12 @@ async def index():
 @app.get("/login", response_class=HTMLResponse)
 async def login_page():
     return _page(static_dir / "login.html")
+
+
+@app.get("/admin")
+@app.get("/admin/")
+async def admin_index():
+    return RedirectResponse(url="/admin/system", status_code=302)
 
 
 @app.get("/admin/system", response_class=HTMLResponse)

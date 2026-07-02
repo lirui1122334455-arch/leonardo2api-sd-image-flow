@@ -81,6 +81,13 @@ export function setActiveNav(id) {
   if (el) el.classList.add("active");
 }
 
+function removeLegacyPromoNav() {
+  const nav = document.querySelector(".admin-top-nav");
+  if (!nav) return;
+
+  nav.querySelectorAll(".btn-outline-info, .navbar-text:not([data-role])").forEach((el) => el.remove());
+}
+
 const PAGE_PATHS = {
   system: "/admin/system",
   projects: "/admin/projects",
@@ -156,6 +163,7 @@ export function applyNavPermissions(user) {
 }
 
 export async function initAdminPage(pageKey) {
+  removeLegacyPromoNav();
   const user = await getAdminProfile();
   if (!user) return null;
   applyNavPermissions(user);
@@ -203,8 +211,12 @@ export async function logout() {
 try {
   if (typeof document !== "undefined") {
     if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", () => mountNavbarClock());
+      document.addEventListener("DOMContentLoaded", () => {
+        removeLegacyPromoNav();
+        mountNavbarClock();
+      });
     } else {
+      removeLegacyPromoNav();
       mountNavbarClock();
     }
   }
