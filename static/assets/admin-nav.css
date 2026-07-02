@@ -1,0 +1,38 @@
+/* 管理后台顶栏：任意宽度下保持横向一行，窄屏可横向滚动 */
+.admin-top-nav > .container-fluid {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+  gap: 0.25rem;
+  -webkit-overflow-scrolling: touch;
+}
+
+.admin-top-nav .navbar-brand {
+  flex-shrink: 0;
+  white-space: nowrap;
+  margin-right: 0.5rem;
+}
+
+.admin-top-nav .navbar-nav {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+}
+
+.admin-top-nav .navbar-nav .nav-link {
+  white-space: nowrap;
+  padding-left: 0.45rem;
+  padding-right: 0.45rem;
+}
+
+.admin-top-nav .navbar-text {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.admin-top-nav .btn {
+  flex-shrink: 0;
+}

@@ -1,0 +1,54 @@
+FPBrowser2API（Python/FastAPI）项目说明与约定
+
+1) 目录结构（固定）
+- fpbrowser2api/
+  - config/
+    - setting.toml: 基础配置（host/port、默认管理员、api_key、系统默认代理/调试等）
+  - src/
+    - main.py: FastAPI 初始化、lifespan 启动逻辑、静态页面路由
+    - api/
+      - routes.py: 对外“使用接口”（发起任务、查询任务）
+      - admin.py: 管理接口（登录、系统配置、项目/浏览器/空间/窗口同步、任务类型、日志）
+    - core/
+      - config.py: 读取 setting.toml + DB 覆盖运行时配置
+      - database.py: aiosqlite 建库/迁移/CRUD（启动时自动创建与补字段）
+      - auth.py: API Key 校验、密码 hash/verify
+      - logger.py: 日志（支持写本地文件）
+      - models.py: Pydantic 数据模型
+    - services/
+      - fp_browser_client.py: 指纹浏览器局域网 API 适配层（同步窗口信息的入口）
+      - task_service.py: 任务调度（窗口挑选、并发/额度/冷却、后台执行）
+      - image_task_executor.py: 图片任务执行器（当前为模拟进度；后续接入真实图片生成）
+      - video_task_executor.py: 视频任务执行器（当前为模拟进度；后续接入真实视频生成）
+      - playwright_broswer_context.py: 通用指纹浏览器 Playwright 上下文（开窗/连CDP/挑页/page内fetch）
+      - sora_task_executor.py: Sora 执行器（sora_gen_video + SoraSession：nf/create、pending、drafts/publish、nf_check、invite）
+      - jimeng_task_executor.py: 即梦执行器（预留骨架；复用 playwright_broswer_context.py）
+  - static/
+    - login.html: 登录页
+    - system.html: 系统配置页
+    - projects.html: 项目/指纹浏览器/空间/窗口管理页（含同步）
+    - task_types.html: 任务类型与窗口绑定页
+    - test.html: 测试发起任务与查看进度页
+    - logs.html: 请求日志页
+    - assets/app.js: 页面通用请求/鉴权/Toast 工具
+
+2) 启动方式
+- 在 fpbrowser2api/ 下执行：python main.py
+- 默认端口：8000（配置在 config/setting.toml 的 [server].port）
+
+3) 数据库与“自动更新”
+- SQLite DB 文件：fpbrowser2api/data/fpbrowser.db
+- 启动时会：
+  - init_db(): CREATE TABLE IF NOT EXISTS 建表
+  - check_and_migrate_db(): 检查缺失表/字段并补齐（ALTER TABLE ADD COLUMN）
+  - 首次启动写入默认管理员与 system_config、默认任务类型（gen_video / gen_image）
+
+4) 真实自动化接入点（后续增强）
+- 目前 gen_image/gen_video 仍为“模拟进度”，真实执行建议分别在：
+  - src/services/image_task_executor.py
+  - src/services/video_task_executor.py
+  内实现并持续调用 progress_cb 更新进度。
+- Sora 的真实自动化执行入口在：
+  - src/services/sora_task_executor.py（执行入口）
+  - src/services/sora_browser_context.py（窗口复用与通用 API）
+

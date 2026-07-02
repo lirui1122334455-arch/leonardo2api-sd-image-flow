@@ -1,0 +1,84 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>FPBrowser2API</title>
+  <style>
+    body { width: 420px; margin: 0; padding: 12px; font-family: Arial, sans-serif; background:#0f172a; color:#e5e7eb; }
+    h1 { font-size: 16px; margin: 0 0 10px; }
+    .card { background:#111827; border:1px solid #334155; border-radius:10px; padding:10px; margin-bottom:10px; }
+    .row { display:flex; gap:8px; align-items:center; margin:7px 0; }
+    label { width:86px; color:#cbd5e1; font-size:12px; }
+    input { flex:1; background:#020617; color:#e5e7eb; border:1px solid #475569; border-radius:6px; padding:6px; font-size:12px; }
+    input[type="checkbox"] { flex:0; width:16px; height:16px; }
+    button { background:#2563eb; color:#fff; border:0; border-radius:7px; padding:7px 10px; cursor:pointer; font-size:12px; }
+    button.secondary { background:#475569; }
+    button.danger { background:#b91c1c; }
+    .status { display:flex; align-items:center; gap:8px; font-size:13px; }
+    .dot { width:10px; height:10px; border-radius:50%; background:#64748b; }
+    .dot.ok { background:#22c55e; }
+    .dot.warn { background:#f59e0b; }
+    .dot.bad { background:#ef4444; }
+    .kv { font-size:12px; line-height:1.55; color:#cbd5e1; word-break:break-all; }
+    .logs { max-height:230px; overflow:auto; background:#020617; border-radius:8px; padding:8px; font-family:Consolas, monospace; font-size:11px; }
+    .log { border-bottom:1px solid #1e293b; padding:5px 0; white-space:pre-wrap; word-break:break-all; }
+    .log .ts { color:#94a3b8; }
+    .log.info .lvl { color:#60a5fa; }
+    .log.debug .lvl { color:#a78bfa; }
+    .log.warn .lvl { color:#fbbf24; }
+    .log.error .lvl { color:#f87171; }
+    .hint { color:#94a3b8; font-size:11px; margin-top:4px; }
+  </style>
+</head>
+<body>
+  <h1>FPBrowser2API 插件调试</h1>
+
+  <div class="card">
+    <div class="status">
+      <span id="dot" class="dot"></span>
+      <b id="connText">Loading...</b>
+    </div>
+    <div id="statusKv" class="kv"></div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <label>Bridge URL</label>
+      <input id="bridgeUrl" placeholder="ws://127.0.0.1:8000/api/extension/ws" />
+    </div>
+    <div class="row">
+      <label>Token</label>
+      <input id="bridgeToken" placeholder="可空" />
+    </div>
+    <div class="row">
+      <label>Space ID</label>
+      <input id="spaceId" placeholder="space_id" />
+    </div>
+    <div class="row">
+      <label>Window Key</label>
+      <input id="windowKey" placeholder="window_key" />
+    </div>
+    <div class="row">
+      <label>图片/视频</label>
+      <input id="veoArchiveEnabled" type="checkbox" />
+      <span class="hint">自动清理</span>
+    </div>
+    <div class="row">
+      <button id="saveBtn">保存并重连</button>
+      <button id="reconnectBtn" class="secondary">重连</button>
+      <button id="refreshBtn" class="secondary">刷新</button>
+    </div>
+    <div class="hint">保存后可访问后端 /api/extension/clients 查看注册状态。</div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <b>任务 / 日志</b>
+      <button id="clearBtn" class="danger">清空日志</button>
+    </div>
+    <div id="logs" class="logs"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

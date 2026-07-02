@@ -1,0 +1,6 @@
+python scripts\obfuscate_project.py . `
+  -O ..\fpbrowser2api_public `
+  --keep src/api/routes.py `
+  --keep src/services/veo_workflow_executor.py `
+  --exclude-glob "data/*" `
+  --exclude-glob "logs/*"

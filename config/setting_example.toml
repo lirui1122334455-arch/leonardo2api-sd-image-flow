@@ -1,0 +1,100 @@
+[server]
+host = "0.0.0.0"
+port = 8000
+
+[global]
+admin_username = "admin"
+admin_password = "admin"
+api_key = "fpb123456"
+
+[system]
+# 是否默认启用代理（影响自动化/对外请求）
+proxy_enabled = false
+proxy_url = ""
+
+# 是否启用调试模式（更详细的日志）
+debug_enabled = false
+
+# 是否把日志写入本地文件（fpbrowser2api/app.log）
+log_to_file = false
+
+[extension_executor]
+# 是否全局默认使用浏览器插件执行器；false 时可在单个任务 payload 里传 executor="extension" 启用。
+enabled = false
+base_url = "192.168.1.4:8000"
+# 指纹浏览器插件连接 Python 后端的 WebSocket 地址为f"ws://{base_url}/api/extension/ws"
+# 插件配置中转页：Python 先打开f"http://{base_url}/"页面写入 fpb_* 与 redirect_url，插件连接 WS 后再跳转目标站点。
+# 可选鉴权 token；留空则不校验
+bridge_token = ""
+task_timeout_seconds = 1800
+
+[flow_health]
+extension_keepalive_enabled = true
+extension_keepalive_include_disabled = true
+extension_keepalive_startup_min_seconds = 30
+extension_keepalive_startup_max_seconds = 90
+extension_keepalive_interval_min_seconds = 600
+extension_keepalive_interval_max_seconds = 900
+extension_keepalive_timeout_seconds = 8
+light_activity_enabled = true
+light_activity_include_disabled = false
+light_activity_startup_min_seconds = 300
+light_activity_startup_max_seconds = 900
+light_activity_interval_min_seconds = 1500
+light_activity_interval_max_seconds = 2700
+light_activity_busy_retry_min_seconds = 300
+light_activity_busy_retry_max_seconds = 600
+light_activity_between_windows_min_seconds = 20
+light_activity_between_windows_max_seconds = 90
+light_activity_tick_seconds = 60
+light_activity_timeout_seconds = 60
+background_include_disabled = true
+reenable_on_probe_ok = true
+# Flow 账号低频健康检查：只读取 /fx/api/auth/session，不登录、不生成、不主动刷新目标页。
+enabled = true
+# 启动后随机等待 30-60 分钟再开始后台检查，避免服务重启后立刻访问 Google。
+startup_delay_min_seconds = 1800
+startup_delay_max_seconds = 3600
+# 后台每 30-45 分钟随机检查 1 个 Flow 窗口。
+interval_min_seconds = 1800
+interval_max_seconds = 2700
+# 后台检查默认只使用已经连接的浏览器插件；未连接就跳过，不主动开窗。
+background_auto_trigger_connection = true
+background_timeout_seconds = 20
+# 真实任务开始前做一次轻量预检；同一账号预检成功后 15 分钟内不重复检查。
+task_precheck_enabled = true
+task_precheck_auto_trigger_connection = true
+task_precheck_cache_seconds = 900
+task_precheck_timeout_seconds = 30
+# 账号预检发现掉线时，禁用该 mapping 并最多切换其它账号重试 3 次。
+account_switch_max_retries = 3
+
+[gpt_keepalive]
+# GPT账号低频保活：只读取 ChatGPT /api/auth/session，成功后更新 access_token，不生成、不刷新额度。
+enabled = true
+include_disabled = false
+startup_delay_min_seconds = 120
+startup_delay_max_seconds = 300
+interval_min_seconds = 1200
+interval_max_seconds = 1800
+auto_trigger_connection = false
+connect_wait_seconds = 1
+timeout_seconds = 45
+
+[ai_agent]
+# 大模型中转站地址在代码中固定为 https://www.newtoken.club/，这里仅配置默认模型和默认 API Key。
+# 也可用环境变量 AI_AGENT_API_KEY / NEWTOKEN_API_KEY / OPENAI_API_KEY 注入，优先级高于本配置。
+default_model = "gpt-5.5"
+api_key = ""
+
+# VEO 2K 放大图为 JPEG 字节；启用后上传到 OSS，任务结果里 upsample_url 存公网 URL，避免大 base64 撑爆数据库
+[oss]
+enabled = false
+endpoint = "https://oss-cn-hangzhou.aliyuncs.com"
+region = "cn-hangzhou"
+bucket = "your-bucket"
+public_base_url = "https://your-cdn.example.com/"
+# 密钥可用 access_key_id / access_key_secret，或 OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET（与 comfyui_async_service 一致）
+# access_key_id = ""
+# access_key_secret = ""
+

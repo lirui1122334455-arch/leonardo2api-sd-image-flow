@@ -1,0 +1,947 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>测试 - Mirr矩阵</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link href="/assets/admin-nav.css" rel="stylesheet" />
+    <style>
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+      .result-preview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+      .result-preview-grid img { width: 100%; max-height: 320px; object-fit: contain; background: #fff; border: 1px solid #dee2e6; border-radius: 6px; }
+      .result-preview-grid video { width: 100%; max-height: 320px; background: #000; border-radius: 6px; }
+    </style>
+  </head>
+  <body class="bg-light">
+    <div id="toastContainer" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
+
+    <nav class="navbar navbar-dark bg-dark admin-top-nav">
+      <div class="container-fluid">
+        <a class="navbar-brand" href="/admin/system">Mirr矩阵</a>
+        <div class="navbar-nav me-auto">
+          <a class="nav-link" data-nav="system" href="/admin/system">系统配置</a>
+          <a class="nav-link" data-nav="projects" href="/admin/projects">项目管理</a>
+          <a class="nav-link" data-nav="task_types" href="/admin/task-types">任务类型管理</a>
+          <a class="nav-link" data-nav="tasks" href="/admin/tasks">任务列表</a>
+          <a class="nav-link" data-nav="test" href="/admin/test">测试</a>
+          <a class="nav-link" data-nav="agent" href="/admin/agent">智能体</a>
+          <a class="nav-link" data-nav="paypal" href="/admin/paypal">PayPal管理</a>
+          <a class="nav-link" data-nav="image_resources" href="/admin/image-resources">图片资源</a>
+          <a class="nav-link" data-nav="card_keys" href="/admin/card-keys">卡密管理</a>
+          <a class="nav-link" data-nav="logs" href="/admin/logs">请求日志</a>
+          <a class="nav-link" data-nav="users" href="/admin/users">用户管理</a>
+        </div>
+        <a class="btn btn-outline-info btn-sm me-3" href="https://github.com/lakysir/fpbrowser2api" target="_blank" rel="noopener noreferrer">源码部署</a>
+        <span class="navbar-text text-light small me-3">Telegram：<span class="font-monospace">@newtoken_me</span></span>
+        <a class="btn btn-outline-info btn-sm me-3" href="https://www.newtoken.club/" target="_blank" rel="noopener noreferrer">[官方中转站]</a>
+        <span class="navbar-text text-light small font-monospace me-3" data-role="navbarClock" title="当前时间"></span>
+        <button class="btn btn-outline-light btn-sm" id="btnLogout">退出</button>
+      </div>
+    </nav>
+
+    <div class="container py-4">
+      <div class="row g-4">
+        <div class="col-12 col-lg-6">
+          <div class="card shadow-sm">
+            <div class="card-body">
+              <h5 class="card-title">发起测试任务</h5>
+              <div class="mb-3">
+                <label class="form-label">任务类型</label>
+                <select class="form-select" id="taskType"></select>
+              </div>
+              <div class="mb-3" id="videoModelWrap" style="display: none;">
+                <label class="form-label">Flow/Veo 模型（可选）</label>
+                <select class="form-select" id="videoModel">
+                  <option value="">默认：Veo 3.1 Fast</option>
+                  <option value="VEOomni">VEOomni / Gemini Omni Flash</option>
+                  <option value="veo-3-1-lite">Veo 3.1 - Lite</option>
+                  <option value="veo-3-1-fast">Veo 3.1 - Fast</option>
+                  <option value="veo-3-1-quality">Veo 3.1 - Quality</option>
+                </select>
+                <div class="text-muted small">VEOomni 的 duration 支持 4 / 6 / 8 / 10；Veo 3.1 Lite/Fast/Quality 当前固定 8 秒。填写图片链接或 images/Ingredients_images 会走参考图视频。</div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">卡密（可选）</label>
+                <select class="form-select mono" id="cardKeySelect">
+                  <option value="">不使用卡密</option>
+                </select>
+                <div class="text-muted small">选项前缀是序号，便于快速定位第几个卡密。</div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">执行窗口（可选）</label>
+                <select class="form-select" id="taskWindow"></select>
+                <div class="text-muted small">不选择则由后端按任务类型自动挑选可用窗口（默认机制）。</div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">文本内容</label>
+                <textarea class="form-control" id="prompt" rows="5" placeholder="输入文本提示词"></textarea>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">角色视频链接 video_url（可选，用于创建角色）</label>
+                <input class="form-control mono" id="videoUrl" placeholder="https://... (mp4)" />
+                <div class="text-muted small">当填写 video_url 时，后端将优先走“创建角色”流程（prompt 可留空）。限制：视频 ≤5 秒、≤10MB。</div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">首帧图片链接 first_image_url（可选）</label>
+                <input class="form-control mono" id="firstImageUrl" placeholder="https://..." />
+                <div class="text-muted small">后端不再接收图片二进制，只接收网络链接（由 handler 自行处理）。</div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">图片比例 aspect_ratio（可选）</label>
+                <select class="form-select" id="imageAspectRatio">
+                  <option value="">Auto</option>
+                  <option value="1:1">Square 1:1</option>
+                  <option value="3:2">Landscape 3:2</option>
+                  <option value="2:3">Portrait 2:3</option>
+                  <option value="3:4">Portrait 3:4</option>
+                  <option value="9:16">Story 9:16</option>
+                  <option value="4:3">Landscape 4:3</option>
+                  <option value="16:9">Widescreen 16:9</option>
+                </select>
+                <div class="text-muted small">GPT image2 会透传为 <span class="mono">aspect_ratio</span> / <span class="mono">ratio</span>，并换算成对应 <span class="mono">size</span>。</div>
+              </div>
+              <div class="mb-3" id="leonardoModelWrap" style="display: none;">
+                <label class="form-label">Leonardo Seedance 2.0 model</label>
+                <select class="form-select" id="leonardoModel">
+                  <option value="seedance-2.0-fast">seedance-2.0-fast</option>
+                  <option value="seedance-2.0">seedance-2.0</option>
+                  <option value="seedance-2.0-mini">seedance-2.0-mini</option>
+                </select>
+                <div class="row g-2 mt-1">
+                  <div class="col-12 col-md-4">
+                    <label class="form-label">resolution</label>
+                    <select class="form-select" id="leonardoResolution">
+                      <option value="RESOLUTION_480">480p</option>
+                      <option value="RESOLUTION_720" selected>720p</option>
+                      <option value="RESOLUTION_1080">1080p</option>
+                    </select>
+                  </div>
+                  <div class="col-12 col-md-4">
+                    <label class="form-label">aspect_ratio</label>
+                    <select class="form-select" id="leonardoAspect">
+                      <option value="1:1">1:1</option>
+                      <option value="16:9" selected>16:9</option>
+                      <option value="9:16">9:16</option>
+                      <option value="4:3">4:3</option>
+                      <option value="3:4">3:4</option>
+                    </select>
+                  </div>
+                  <div class="col-12 col-md-4">
+                    <label class="form-label">size</label>
+                    <select class="form-select mono" id="leonardoSize"></select>
+                  </div>
+                </div>
+                <div class="row g-2 mt-1">
+                  <div class="col-12 col-md-6">
+                    <label class="form-label">start_frame_url</label>
+                    <input class="form-control mono" id="leonardoStartFrameUrl" placeholder="https://..." />
+                  </div>
+                  <div class="col-12 col-md-6">
+                    <label class="form-label">end_frame_url</label>
+                    <input class="form-control mono" id="leonardoEndFrameUrl" placeholder="https://..." />
+                  </div>
+                </div>
+                <div class="mt-2">
+                  <label class="form-label">reference_image_urls (max 6, one per line)</label>
+                  <textarea class="form-control mono" id="leonardoReferenceImageUrls" rows="3" placeholder="https://..."></textarea>
+                </div>
+                <div class="mt-2">
+                  <label class="form-label">reference_video_url</label>
+                  <input class="form-control mono" id="leonardoReferenceVideoUrl" placeholder="https://... (mp4/mov)" />
+                </div>
+                <div class="mt-2">
+                  <label class="form-label">reference_audio_url (max 1, requires image/video reference)</label>
+                  <input class="form-control mono" id="leonardoReferenceAudioUrl" placeholder="https://... (mp3/wav)" />
+                </div>
+                <div class="mt-2 form-check">
+                  <input class="form-check-input" type="checkbox" id="leonardoMotionHasAudio" checked />
+                  <label class="form-check-label" for="leonardoMotionHasAudio">motion_has_audio</label>
+                </div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">GPT image2 size（可选）</label>
+                <input class="form-control mono" id="imageSize" list="imageSizeOptions" placeholder="1536x1024" />
+                <datalist id="imageSizeOptions">
+                  <option value="auto"></option>
+                  <option value="1024x1024"></option>
+                  <option value="1536x1024"></option>
+                  <option value="1024x1536"></option>
+                  <option value="2048x2048"></option>
+                  <option value="2048x1152"></option>
+                  <option value="1152x2048"></option>
+                  <option value="3840x2160"></option>
+                  <option value="2160x3840"></option>
+                </datalist>
+                <div class="text-muted small">留空时按上面的比例和分辨率换算；填写时会直接透传官方 <span class="mono">size</span>。</div>
+              </div>
+              <div class="mb-3 form-check">
+                <input class="form-check-input" type="checkbox" id="dreaminaImageUploadWorkflow" />
+                <label class="form-check-label" for="dreaminaImageUploadWorkflow">Dreamina 单图上传保存（workflow_kind=image_upload）</label>
+                <div class="text-muted small">勾选后会把上面的图片链接作为 <span class="mono">image_url</span>，并在 payload 中加入 <span class="mono">workflow_kind: "image_upload"</span>。</div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">时长 duration（可选）</label>
+                <input class="form-control mono" id="duration" placeholder="5" />
+                <div class="text-muted small">输入为1的时候生成图片</div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">图片输出分辨率（可选）</label>
+                <select class="form-select" id="imageResolution">
+                  <option value="1k">1K（默认）</option>
+                  <option value="2k">2K</option>
+                  <option value="4k">4K</option>
+                </select>
+              </div>
+              <div class="mb-3 form-check">
+                <input class="form-check-input" type="checkbox" id="headlessMode" />
+                <label class="form-check-label" for="headlessMode">无头模式打开窗口</label>
+                <div class="text-muted small">勾选后将以无头模式（headless）打开指纹浏览器窗口，不显示界面。</div>
+              </div>
+              <button class="btn btn-primary" id="btnSubmit">提交任务</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-12 col-lg-6">
+          <div class="card shadow-sm">
+            <div class="card-body">
+              <h5 class="card-title">任务进度</h5>
+              <div class="mb-2">
+                <div class="text-muted small">task_id</div>
+                <div class="input-group">
+                  <input class="form-control mono" id="taskIdInput" placeholder="输入 task_id 后点击查询" />
+                  <button class="btn btn-outline-secondary" id="btnQuery">查询</button>
+                </div>
+                <div class="text-muted small mt-1">可手动输入任意 task_id 单次查询（不会自动提交任务）。</div>
+              </div>
+              <div class="mb-3">
+                <div class="progress" role="progressbar">
+                  <div class="progress-bar" id="bar" style="width: 0%">0%</div>
+                </div>
+              </div>
+              <div class="mb-3">
+                <div class="text-muted small">状态</div>
+                <div id="status">-</div>
+              </div>
+              <div class="mb-3">
+                <div class="text-muted small">结果</div>
+                <div id="resultPreview" class="result-preview-grid mb-2"></div>
+                <pre class="bg-light border rounded p-2 small" id="result" style="min-height: 160px; white-space: pre-wrap;"></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script type="module">
+      import { adminFetch, toast, setActiveNav, logout, escapeHtml, initAdminPage } from "/assets/app.js";
+
+      initAdminPage("test");
+      setActiveNav("test");
+      document.getElementById("btnLogout").addEventListener("click", logout);
+
+      // ---- 本地缓存（localStorage）----
+      const LS_PREFIX = "fpbrowser2api.admin.";
+      const LS_KEYS = {
+        testTaskType: `${LS_PREFIX}test.task_type_code`,
+        testCardKeyId: `${LS_PREFIX}test.card_key_id`,
+        testPrompt: `${LS_PREFIX}test.prompt`,
+        testVideoUrl: `${LS_PREFIX}test.video_url`,
+        testFirstImageUrl: `${LS_PREFIX}test.first_image_url`,
+        testDreaminaImageUploadWorkflow: `${LS_PREFIX}test.dreamina_image_upload_workflow`,
+        testDuration: `${LS_PREFIX}test.duration`,
+        testVideoModel: `${LS_PREFIX}test.video_model`,
+        testLeonardoModel: `${LS_PREFIX}test.leonardo_model`,
+        testLeonardoResolution: `${LS_PREFIX}test.leonardo_resolution`,
+        testLeonardoAspect: `${LS_PREFIX}test.leonardo_aspect`,
+        testLeonardoSize: `${LS_PREFIX}test.leonardo_size`,
+        testLeonardoStartFrameUrl: `${LS_PREFIX}test.leonardo_start_frame_url`,
+        testLeonardoEndFrameUrl: `${LS_PREFIX}test.leonardo_end_frame_url`,
+        testLeonardoReferenceImageUrls: `${LS_PREFIX}test.leonardo_reference_image_urls`,
+        testLeonardoReferenceVideoUrl: `${LS_PREFIX}test.leonardo_reference_video_url`,
+        testLeonardoReferenceAudioUrl: `${LS_PREFIX}test.leonardo_reference_audio_url`,
+        testLeonardoMotionHasAudio: `${LS_PREFIX}test.leonardo_motion_has_audio`,
+        testImageResolution: `${LS_PREFIX}test.image_resolution`,
+        testImageAspectRatio: `${LS_PREFIX}test.image_aspect_ratio`,
+        testImageSize: `${LS_PREFIX}test.image_size`,
+        testLastTaskId: `${LS_PREFIX}test.last_task_id`,
+      };
+      function mappingLsKey(taskTypeCode) {
+        return `${LS_PREFIX}test.mapping_id.${taskTypeCode || ""}`;
+      }
+      function lsGet(key) {
+        try { return localStorage.getItem(key); } catch { return null; }
+      }
+      function lsSet(key, val) {
+        try { localStorage.setItem(key, val ?? ""); } catch {}
+      }
+      function lsDel(key) {
+        try { localStorage.removeItem(key); } catch {}
+      }
+
+      let apiKey = null;
+      let pollTimer = null;
+      let autoPollEnabled = true; // 提交任务默认自动轮询；手动“查询”则视为单次查询
+
+      let taskTypeByCode = new Map(); // code -> {id, code, name, ...}
+      let cardKeys = []; // [{id, card_key, sort_order, ...}]
+
+      const LEONARDO_TEST_DEFAULTS = {
+        model: "seedance-2.0-fast",
+        resolution: "RESOLUTION_720",
+        aspectRatio: "16:9",
+        duration: "8",
+      };
+
+      function isGptType(typeCode) {
+        const t = taskTypeByCode.get(typeCode);
+        return typeCode === "gpt_workflow" || String(t?.create_task_handler || "").trim() === "gpt_workflow";
+      }
+
+      function isLeonardoType(typeCode) {
+        const t = taskTypeByCode.get(typeCode);
+        return typeCode === "leonardo_workflow" || String(t?.create_task_handler || "").trim() === "leonardo_workflow";
+      }
+
+      function setSelectValueIfEmpty(id, value) {
+        const el = document.getElementById(id);
+        if (!el || el.value) return;
+        if (Array.from(el.options || []).some(o => o.value === value)) {
+          el.value = value;
+        }
+      }
+
+      function applyLeonardoDefaultsIfEmpty() {
+        setSelectValueIfEmpty("leonardoModel", LEONARDO_TEST_DEFAULTS.model);
+        setSelectValueIfEmpty("leonardoResolution", LEONARDO_TEST_DEFAULTS.resolution);
+        setSelectValueIfEmpty("leonardoAspect", LEONARDO_TEST_DEFAULTS.aspectRatio);
+        const durationEl = document.getElementById("duration");
+        if (durationEl && !durationEl.value.trim()) {
+          durationEl.value = LEONARDO_TEST_DEFAULTS.duration;
+          lsSet(LS_KEYS.testDuration, LEONARDO_TEST_DEFAULTS.duration);
+        }
+      }
+
+      const LEONARDO_SIZE_TABLE = {
+        RESOLUTION_480: {
+          "16:9": [864, 496],
+          "9:16": [496, 864],
+          "1:1": [496, 496],
+          "4:3": [640, 480],
+          "3:4": [480, 640],
+        },
+        RESOLUTION_720: {
+          "16:9": [1280, 720],
+          "9:16": [720, 1280],
+          "1:1": [720, 720],
+          "4:3": [960, 720],
+          "3:4": [720, 960],
+        },
+        RESOLUTION_1080: {
+          "16:9": [1920, 1080],
+          "9:16": [1080, 1920],
+          "1:1": [1080, 1080],
+          "4:3": [1440, 1080],
+          "3:4": [1080, 1440],
+        },
+      };
+
+      function updateLeonardoSizeOptions() {
+        const resEl = document.getElementById("leonardoResolution");
+        const aspectEl = document.getElementById("leonardoAspect");
+        const sizeEl = document.getElementById("leonardoSize");
+        if (!resEl || !aspectEl || !sizeEl) return;
+        const resolution = resEl.value || "RESOLUTION_720";
+        const aspect = aspectEl.value || "16:9";
+        const table = LEONARDO_SIZE_TABLE[resolution] || LEONARDO_SIZE_TABLE.RESOLUTION_720;
+        const entries = Object.entries(table);
+        const selectedValue = `${aspect} ${table[aspect]?.[0] || entries[0][1][0]}x${table[aspect]?.[1] || entries[0][1][1]}`;
+        sizeEl.innerHTML = entries.map(([ratio, dims]) => {
+          const value = `${ratio} ${dims[0]}x${dims[1]}`;
+          return `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`;
+        }).join("");
+        if (Array.from(sizeEl.options).some(o => o.value === selectedValue)) {
+          sizeEl.value = selectedValue;
+        }
+      }
+
+      function syncLeonardoAspectFromSize() {
+        const sizeEl = document.getElementById("leonardoSize");
+        const aspectEl = document.getElementById("leonardoAspect");
+        const raw = (sizeEl?.value || "").trim();
+        const ratio = raw.split(/\s+/)[0] || "";
+        if (aspectEl && Array.from(aspectEl.options).some(o => o.value === ratio)) {
+          aspectEl.value = ratio;
+        }
+      }
+
+      function parseLeonardoSelectedSize() {
+        const raw = (document.getElementById("leonardoSize")?.value || "").trim();
+        const m = raw.match(/(\d+)\s*x\s*(\d+)/i);
+        if (!m) return null;
+        return { width: Number(m[1]), height: Number(m[2]) };
+      }
+
+      function splitLines(value) {
+        return String(value || "").split(/\r?\n|,/).map(x => x.trim()).filter(Boolean);
+      }
+
+      function collectTaskUrls(d) {
+        const result = d?.result || {};
+        const meta = d?.metadata || result.metadata || {};
+        return []
+          .concat(d?.proxy_urls || [])
+          .concat(meta.proxy_urls || [])
+          .concat(result.proxy_urls || [])
+          .concat(d?.proxy_image_url || [])
+          .concat(result.proxy_image_url || [])
+          .concat(result.urls || [])
+          .concat(meta.result_urls || [])
+          .concat(d?.url || [])
+          .concat(d?.image_url || [])
+          .concat(d?.video_url || [])
+          .concat(result.image_url || [])
+          .concat(result.video_url || [])
+          .concat(result.share_url || [])
+          .map(x => String(x || "").trim())
+          .filter(Boolean);
+      }
+
+      function renderResultPreview(d) {
+        const preview = document.getElementById("resultPreview");
+        if (!preview) return;
+        const result = d?.result || {};
+        const resultKind = String(result.workflow_kind || result.type || d?.workflow_kind || "").toLowerCase();
+        const isVideoUrl = (u) => /^data:video\//i.test(u) || /\.(mp4|mov|webm)(\?|$)/i.test(u) || /(?:video|motion)/i.test(u);
+        const isImageUrl = (u) => /^data:image\//i.test(u) || /\/v1\/tasks\/[^/]+\/assets\/\d+(\?|$)/i.test(u) || /\.(png|jpe?g|webp|gif)(\?|$)/i.test(u) || /files\.oaiusercontent\.com/i.test(u);
+        const directVideoUrls = []
+          .concat(d?.video_url || [])
+          .concat(result.video_url || [])
+          .concat(result.share_url || [])
+          .concat(resultKind.includes("video") ? (result.urls || []) : [])
+          .map(x => String(x || "").trim())
+          .filter(Boolean);
+        const urls = collectTaskUrls(d);
+        const videoCandidates = Array.from(new Set(directVideoUrls.concat(urls)));
+        const videoUrl = videoCandidates.find(isVideoUrl) || directVideoUrls.find(u => !isImageUrl(u));
+        const imageUrl = urls.find(u => isImageUrl(u) || (!videoUrl && /\.blob\.core\.windows\.net/i.test(u)));
+        if (videoUrl) {
+          preview.innerHTML = `<video src="${escapeHtml(videoUrl)}" controls playsinline></video>`;
+        } else if (imageUrl) {
+          preview.innerHTML = `<a href="${escapeHtml(imageUrl)}" target="_blank" rel="noopener noreferrer"><img src="${escapeHtml(imageUrl)}" alt="generated image" /></a>`;
+        } else {
+          preview.innerHTML = "";
+        }
+      }
+
+      function updateTypeHints() {
+        const type = document.getElementById("taskType")?.value || "";
+        const isLeonardo = isLeonardoType(type);
+        const videoModelWrap = document.getElementById("videoModelWrap");
+        if (videoModelWrap) videoModelWrap.style.display = type === "veo_workflow" ? "" : "none";
+        const leonardoModelWrap = document.getElementById("leonardoModelWrap");
+        if (leonardoModelWrap) leonardoModelWrap.style.display = isLeonardo ? "" : "none";
+        const durationEl = document.getElementById("duration");
+        if (durationEl) durationEl.placeholder = isGptType(type) ? "GPT image2 auto uses 1" : (isLeonardo ? "8" : "5");
+        if (isLeonardo) applyLeonardoDefaultsIfEmpty();
+        updateLeonardoSizeOptions();
+      }
+
+      async function loadApiKey() {
+        const r = await adminFetch("/api/admin/system-config");
+        if (!r) return;
+        const d = await r.json();
+        apiKey = d.config?.api_key || null;
+      }
+
+      async function loadTaskTypes() {
+        const r = await adminFetch("/api/admin/task-types");
+        if (!r) return;
+        const d = await r.json();
+        const items = (d.task_types || []).filter(t => !t.deleted && t.enabled);
+        taskTypeByCode = new Map(items.map(t => [t.code, t]));
+        const sel = document.getElementById("taskType");
+        sel.innerHTML = items.map(t => `<option value="${escapeHtml(t.code)}">${escapeHtml(t.name)} (${escapeHtml(t.code)})</option>`).join("");
+
+        // 任务类型回填（需等 options 渲染完成）
+        const saved = lsGet(LS_KEYS.testTaskType);
+        if (saved && Array.from(sel.options).some(o => o.value === saved)) {
+          sel.value = saved;
+        }
+        updateTypeHints();
+      }
+
+      async function loadCardKeys() {
+        const sel = document.getElementById("cardKeySelect");
+        if (!sel) return;
+        const r = await adminFetch("/api/admin/card-keys");
+        if (!r) return;
+        const d = await r.json();
+        const items = Array.isArray(d.items) ? d.items : [];
+        cardKeys = items;
+        const options = items.map((x, idx) => {
+          const id = Number(x.id || 0);
+          const key = String(x.card_key || "");
+          return `<option value="${escapeHtml(String(id))}">${idx + 1}. ${escapeHtml(key)}</option>`;
+        });
+        sel.innerHTML = `<option value="">不使用卡密</option>${options.join("")}`;
+
+        const saved = lsGet(LS_KEYS.testCardKeyId);
+        if (saved && Array.from(sel.options).some(o => o.value === saved)) {
+          sel.value = saved;
+        } else {
+          sel.value = "";
+        }
+      }
+
+      async function loadTaskWindows(taskTypeCode) {
+        const sel = document.getElementById("taskWindow");
+        if (!sel) return;
+        sel.innerHTML = `<option value="">自动选择（默认）</option>`;
+
+        const t = taskTypeByCode.get(taskTypeCode);
+        const tid = t?.id;
+        if (!tid) return;
+
+        const r = await adminFetch(`/api/admin/task-types/${encodeURIComponent(String(tid))}/windows`);
+        if (!r) return;
+        const d = await r.json();
+        const items = d.items || [];
+
+        const options = items.map(m => {
+          const mappingId = m.id;
+          const winPk = m.window_pk;
+          const sortNum = (m.window_sort_num !== null && m.window_sort_num !== undefined) ? `#${m.window_sort_num}` : "";
+          const winName = (m.window_name || m.window_key || `window_pk=${winPk}`);
+          const acct = m.platform_account ? ` ${m.platform_account}` : "";
+          const quota = `quota=${m.remaining_quota ?? 0}`;
+          const inflight = `inflight=${m.inflight_slots ?? 0}`;
+
+          const flags = [];
+          const mappingEnabled = (m.enabled === 1 || m.enabled === true);
+          const windowEnabled = (m.window_enabled === 1 || m.window_enabled === true);
+          const mappingDeleted = (m.deleted === 1 || m.deleted === true);
+          if (!mappingEnabled) flags.push("映射停用");
+          if (!windowEnabled) flags.push("窗口停用");
+          if (mappingDeleted) flags.push("已删除");
+          if (m.error_cooldown_until) flags.push("错误冷却");
+          if (m.cooldown_until) flags.push("额度冷却");
+
+          const prefix = sortNum ? `${sortNum} ` : "";
+          const flagText = flags.length ? `, ${flags.join("/")}` : "";
+          const label = `${prefix}${winName}${acct} [${quota}, ${inflight}${flagText}] (mapping=${mappingId}, window_pk=${winPk})`;
+          const disabled = mappingDeleted || !mappingEnabled || !windowEnabled;
+
+          return `<option value="${escapeHtml(String(mappingId))}" ${disabled ? "disabled" : ""}>${escapeHtml(label)}</option>`;
+        });
+        sel.innerHTML = `<option value="">自动选择（默认）</option>${options.join("")}`;
+
+        // 按任务类型回填上次选择的 mapping
+        const saved = lsGet(mappingLsKey(taskTypeCode));
+        if (saved && Array.from(sel.options).some(o => o.value === saved && !o.disabled)) {
+          sel.value = saved;
+        } else {
+          sel.value = "";
+        }
+      }
+
+      function setProgress(pct) {
+        const bar = document.getElementById("bar");
+        const v = Math.max(0, Math.min(100, pct || 0));
+        bar.style.width = `${v}%`;
+        bar.textContent = `${v}%`;
+      }
+
+      function renderTaskSnapshot(taskId, d) {
+        const input = document.getElementById("taskIdInput");
+        if (input) input.value = taskId || "";
+        document.getElementById("status").textContent = d?.status ?? "-";
+        setProgress(d?.progress || 0);
+        renderResultPreview(d);
+        document.getElementById("result").textContent = d ? JSON.stringify(d, null, 2) : "";
+      }
+
+      async function fetchAndRenderTask(taskId, { silent = true } = {}) {
+        if (!apiKey) return null;
+        if (!taskId) return null;
+        try {
+          const r = await fetch(`/v1/tasks/${encodeURIComponent(taskId)}`, { headers: { Authorization: `Bearer ${apiKey}` } });
+          const d = await r.json();
+          if (!r.ok) throw new Error(d.detail || "查询失败");
+          renderTaskSnapshot(taskId, d);
+          return d;
+        } catch (e) {
+          if (!silent) toast(e.message, "error");
+          // 如果 task_id 无效/被删除，避免每次切回页面都报错刷屏
+          renderTaskSnapshot(taskId, { status: "unknown", progress: 0, error: e.message });
+          return null;
+        }
+      }
+
+      async function submit() {
+        try {
+          if (!apiKey) throw new Error("API Key 未加载");
+          const type = document.getElementById("taskType").value;
+          const mappingIdRaw = (document.getElementById("taskWindow")?.value || "").trim();
+          const prompt = document.getElementById("prompt").value.trim();
+          const videoUrl = document.getElementById("videoUrl").value.trim();
+          const firstImageUrl = document.getElementById("firstImageUrl").value.trim();
+          const videoModel = (document.getElementById("videoModel")?.value || "").trim();
+          const dreaminaImageUploadWorkflow = document.getElementById("dreaminaImageUploadWorkflow")?.checked === true;
+          const cardKeyIdRaw = (document.getElementById("cardKeySelect")?.value || "").trim();
+          const durationRaw = document.getElementById("duration").value.trim();
+          const duration = durationRaw ? Number(durationRaw) : undefined;
+          if (!type) throw new Error("请选择任务类型");
+          if (!prompt && !videoUrl && !(dreaminaImageUploadWorkflow && firstImageUrl)) throw new Error("请输入文本内容、填写 video_url，或勾选单图上传并填写图片链接");
+          // 注意：不同 task handler 可能需要不同字段，这里仅示例常用字段
+          const payload = { prompt };
+          if (type === "veo_workflow" && videoModel) payload.model = videoModel;
+          if (videoUrl) payload.video_url = videoUrl;
+          if (dreaminaImageUploadWorkflow) {
+            if (!firstImageUrl) throw new Error("Dreamina 单图上传保存需要填写图片链接");
+            payload.workflow_kind = "image_upload";
+            payload.image_url = firstImageUrl;
+          } else if (firstImageUrl) {
+            payload.first_image_url = firstImageUrl;
+          }
+          if (cardKeyIdRaw) {
+            const selected = cardKeys.find(x => String(x.id) === String(cardKeyIdRaw));
+            if (!selected || !selected.card_key) throw new Error("所选卡密不存在，请刷新后重试");
+            payload.card_key = String(selected.card_key);
+          }
+          if (duration !== undefined && !Number.isNaN(duration)) payload.duration = duration;
+          const imageResRaw = (document.getElementById("imageResolution")?.value || "").trim().toLowerCase();
+          const imageResolution = (imageResRaw === "2k" || imageResRaw === "4k") ? imageResRaw : "1k";
+          const imageAspectRatioRaw = (document.getElementById("imageAspectRatio")?.value || "").trim();
+          const allowedImageRatios = new Set(["1:1", "3:2", "2:3", "3:4", "9:16", "4:3", "16:9"]);
+          const imageAspectRatio = allowedImageRatios.has(imageAspectRatioRaw) ? imageAspectRatioRaw : "";
+          const imageSize = (document.getElementById("imageSize")?.value || "").trim();
+          payload.resolution = imageResolution;
+          payload.size_tier = imageResolution.toUpperCase();
+          if (isGptType(type)) {
+            payload.duration = 1;
+            payload.workflow_kind = "image";
+            payload.model = `gpt-image2-${imageResolution}`;
+            payload.model_code = "gpt-image-2";
+            payload.image_model_name = "gpt-image-2";
+            payload.gpt_image2_model = payload.model;
+            if (imageAspectRatio) {
+              payload.aspect_ratio = imageAspectRatio;
+              payload.ratio = imageAspectRatio;
+            }
+            if (imageSize) payload.size = imageSize;
+          }
+          if (isLeonardoType(type)) {
+            const leonardoModel = (document.getElementById("leonardoModel")?.value || "seedance-2.0-fast").trim();
+            const leonardoResolution = (document.getElementById("leonardoResolution")?.value || "RESOLUTION_720").trim();
+            const leonardoAspect = (document.getElementById("leonardoAspect")?.value || "16:9").trim();
+            const dims = parseLeonardoSelectedSize();
+            const startFrameUrl = (document.getElementById("leonardoStartFrameUrl")?.value || "").trim();
+            const endFrameUrl = (document.getElementById("leonardoEndFrameUrl")?.value || "").trim();
+            const refImageUrls = splitLines(document.getElementById("leonardoReferenceImageUrls")?.value || "");
+            const refVideoUrl = (document.getElementById("leonardoReferenceVideoUrl")?.value || "").trim();
+            const refAudioUrl = (document.getElementById("leonardoReferenceAudioUrl")?.value || "").trim();
+            payload.model = leonardoModel;
+            payload.leonardo_model = leonardoModel;
+            payload.resolution = leonardoResolution;
+            payload.aspect_ratio = leonardoAspect;
+            if (payload.duration === undefined) payload.duration = Number(LEONARDO_TEST_DEFAULTS.duration);
+            payload.motion_has_audio = document.getElementById("leonardoMotionHasAudio")?.checked === true;
+            if (dims) {
+              payload.width = dims.width;
+              payload.height = dims.height;
+            }
+            if (startFrameUrl) payload.start_frame_url = startFrameUrl;
+            if (endFrameUrl) payload.end_frame_url = endFrameUrl;
+            if (refImageUrls.length > 6) throw new Error("Leonardo reference_image_urls max 6");
+            if (refImageUrls.length) payload.reference_image_urls = refImageUrls;
+            if (refVideoUrl) payload.reference_video_url = refVideoUrl;
+            if (refAudioUrl && !startFrameUrl && !endFrameUrl && refImageUrls.length === 0 && !refVideoUrl) {
+              throw new Error("Leonardo reference_audio_url requires an image or video reference");
+            }
+            if (refAudioUrl) payload.reference_audio_url = refAudioUrl;
+          }
+          const headlessChecked = document.getElementById("headlessMode")?.checked === true;
+          if (headlessChecked) payload.headless = true;
+
+          let mappingId = null;
+          if (mappingIdRaw) {
+            const n = Number(mappingIdRaw);
+            if (!Number.isFinite(n) || n <= 0) throw new Error("mapping_id 非法（请重新选择窗口）");
+            mappingId = Math.trunc(n);
+          }
+
+          const reqBody = { task_type_code: type, json: payload };
+          if (mappingId) reqBody.mapping_id = mappingId;
+
+          const r = await fetch("/v1/tasks", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+            body: JSON.stringify(reqBody),
+          });
+          const d = await r.json();
+          if (!r.ok) throw new Error(d.detail || "提交失败");
+          toast("提交成功", "success");
+          const input = document.getElementById("taskIdInput");
+          if (input) input.value = d.task_id;
+          document.getElementById("status").textContent = "queued";
+          document.getElementById("result").textContent = "";
+          renderResultPreview(null);
+          setProgress(0);
+          lsSet(LS_KEYS.testLastTaskId, d.task_id);
+          autoPollEnabled = true;
+          startPoll(d.task_id);
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      }
+
+      function stopPoll() {
+        if (pollTimer) clearInterval(pollTimer);
+        pollTimer = null;
+      }
+
+      function startPoll(taskId) {
+        stopPoll();
+        pollTimer = setInterval(async () => {
+          try {
+            const d = await fetchAndRenderTask(taskId, { silent: true });
+            if (!d) return;
+            if (d.status === "completed" || d.status === "failed") {
+              stopPoll();
+            }
+          } catch (e) {
+            // 不打断轮询，避免偶发网络抖动
+          }
+        }, 2000);
+      }
+
+      document.getElementById("btnSubmit").addEventListener("click", submit);
+
+      function getTaskIdFromInput() {
+        const el = document.getElementById("taskIdInput");
+        return (el?.value || "").trim();
+      }
+
+      async function queryOnce() {
+        try {
+          const tid = getTaskIdFromInput();
+          if (!tid) throw new Error("请输入 task_id");
+          autoPollEnabled = false;
+          stopPoll(); // 明确单次查询，不保留轮询
+          lsSet(LS_KEYS.testLastTaskId, tid);
+          await fetchAndRenderTask(tid, { silent: false });
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      }
+
+      document.getElementById("btnQuery").addEventListener("click", queryOnce);
+
+      async function init() {
+        // 文本内容回填（无需等待接口）
+        const promptEl = document.getElementById("prompt");
+        const savedPrompt = lsGet(LS_KEYS.testPrompt);
+        if (savedPrompt !== null) promptEl.value = savedPrompt;
+        promptEl.addEventListener("input", (e) => lsSet(LS_KEYS.testPrompt, e.target.value));
+
+        // video_url 回填
+        const videoUrlEl = document.getElementById("videoUrl");
+        const savedVideoUrl = lsGet(LS_KEYS.testVideoUrl);
+        if (savedVideoUrl !== null && videoUrlEl) videoUrlEl.value = savedVideoUrl;
+        if (videoUrlEl) videoUrlEl.addEventListener("input", (e) => lsSet(LS_KEYS.testVideoUrl, e.target.value));
+
+        // first_image_url 回填
+        const firstImageUrlEl = document.getElementById("firstImageUrl");
+        const savedFirstImageUrl = lsGet(LS_KEYS.testFirstImageUrl);
+        if (savedFirstImageUrl !== null && firstImageUrlEl) firstImageUrlEl.value = savedFirstImageUrl;
+        if (firstImageUrlEl) firstImageUrlEl.addEventListener("input", (e) => lsSet(LS_KEYS.testFirstImageUrl, e.target.value));
+
+        // Dreamina 单图上传保存 workflow_kind=image_upload 回填
+        const dreaminaImageUploadWorkflowEl = document.getElementById("dreaminaImageUploadWorkflow");
+        if (dreaminaImageUploadWorkflowEl) {
+          dreaminaImageUploadWorkflowEl.checked = (lsGet(LS_KEYS.testDreaminaImageUploadWorkflow) || "") === "1";
+          dreaminaImageUploadWorkflowEl.addEventListener("change", (e) => {
+            if (e.target.checked) lsSet(LS_KEYS.testDreaminaImageUploadWorkflow, "1");
+            else lsDel(LS_KEYS.testDreaminaImageUploadWorkflow);
+          });
+        }
+
+        // duration 回填与缓存
+        const durationEl = document.getElementById("duration");
+        const savedDuration = lsGet(LS_KEYS.testDuration);
+        if (savedDuration !== null && durationEl) durationEl.value = savedDuration;
+        if (durationEl) {
+          durationEl.addEventListener("input", (e) => lsSet(LS_KEYS.testDuration, e.target.value));
+        }
+        const videoModelEl = document.getElementById("videoModel");
+        const savedVideoModel = (lsGet(LS_KEYS.testVideoModel) || "").trim();
+        if (videoModelEl && Array.from(videoModelEl.options).some(o => o.value === savedVideoModel)) videoModelEl.value = savedVideoModel;
+        if (videoModelEl) {
+          videoModelEl.addEventListener("change", (e) => lsSet(LS_KEYS.testVideoModel, e.target.value || ""));
+        }
+
+        // 图片输出分辨率回填与缓存（供 GPT image2 / VEO 图片流程读取 payload.resolution）
+        const bindValueCache = (id, key, eventName = "input") => {
+          const el = document.getElementById(id);
+          if (!el) return null;
+          const saved = lsGet(key);
+          if (saved !== null) el.value = saved;
+          el.addEventListener(eventName, (e) => lsSet(key, e.target.value || ""));
+          return el;
+        };
+        bindValueCache("leonardoModel", LS_KEYS.testLeonardoModel, "change");
+        const leonardoResolutionEl = bindValueCache("leonardoResolution", LS_KEYS.testLeonardoResolution, "change");
+        const leonardoAspectEl = bindValueCache("leonardoAspect", LS_KEYS.testLeonardoAspect, "change");
+        updateLeonardoSizeOptions();
+        const leonardoSizeEl = document.getElementById("leonardoSize");
+        const savedLeonardoSize = (lsGet(LS_KEYS.testLeonardoSize) || "").trim();
+        if (leonardoSizeEl && savedLeonardoSize && Array.from(leonardoSizeEl.options).some(o => o.value === savedLeonardoSize)) {
+          leonardoSizeEl.value = savedLeonardoSize;
+          syncLeonardoAspectFromSize();
+        }
+        if (leonardoResolutionEl) {
+          leonardoResolutionEl.addEventListener("change", () => {
+            updateLeonardoSizeOptions();
+            lsSet(LS_KEYS.testLeonardoSize, document.getElementById("leonardoSize")?.value || "");
+          });
+        }
+        if (leonardoAspectEl) {
+          leonardoAspectEl.addEventListener("change", () => {
+            updateLeonardoSizeOptions();
+            lsSet(LS_KEYS.testLeonardoSize, document.getElementById("leonardoSize")?.value || "");
+          });
+        }
+        if (leonardoSizeEl) {
+          leonardoSizeEl.addEventListener("change", () => {
+            syncLeonardoAspectFromSize();
+            lsSet(LS_KEYS.testLeonardoAspect, document.getElementById("leonardoAspect")?.value || "");
+            lsSet(LS_KEYS.testLeonardoSize, leonardoSizeEl.value || "");
+          });
+        }
+        bindValueCache("leonardoStartFrameUrl", LS_KEYS.testLeonardoStartFrameUrl);
+        bindValueCache("leonardoEndFrameUrl", LS_KEYS.testLeonardoEndFrameUrl);
+        bindValueCache("leonardoReferenceImageUrls", LS_KEYS.testLeonardoReferenceImageUrls);
+        bindValueCache("leonardoReferenceVideoUrl", LS_KEYS.testLeonardoReferenceVideoUrl);
+        bindValueCache("leonardoReferenceAudioUrl", LS_KEYS.testLeonardoReferenceAudioUrl);
+        const leonardoMotionHasAudioEl = document.getElementById("leonardoMotionHasAudio");
+        if (leonardoMotionHasAudioEl) {
+          const saved = lsGet(LS_KEYS.testLeonardoMotionHasAudio);
+          leonardoMotionHasAudioEl.checked = saved === null ? true : saved === "1";
+          leonardoMotionHasAudioEl.addEventListener("change", (e) => lsSet(LS_KEYS.testLeonardoMotionHasAudio, e.target.checked ? "1" : "0"));
+        }
+
+        const imageResolutionEl = document.getElementById("imageResolution");
+        const savedImageRes = (lsGet(LS_KEYS.testImageResolution) || "").trim().toLowerCase();
+        if (imageResolutionEl && (savedImageRes === "1k" || savedImageRes === "2k" || savedImageRes === "4k" || savedImageRes === "")) {
+          imageResolutionEl.value = savedImageRes || "1k";
+        }
+        if (imageResolutionEl) {
+          imageResolutionEl.addEventListener("change", (e) => {
+            const v = (e.target.value || "").trim().toLowerCase();
+            if (v === "1k" || v === "2k" || v === "4k") lsSet(LS_KEYS.testImageResolution, v);
+            else lsSet(LS_KEYS.testImageResolution, "1k");
+          });
+        }
+
+        // 任务类型缓存（回填发生在 loadTaskTypes 之后）
+        const imageAspectRatioEl = document.getElementById("imageAspectRatio");
+        const savedImageAspectRatio = (lsGet(LS_KEYS.testImageAspectRatio) || "").trim();
+        const allowedImageRatios = new Set(["", "1:1", "3:2", "2:3", "3:4", "9:16", "4:3", "16:9"]);
+        if (imageAspectRatioEl && allowedImageRatios.has(savedImageAspectRatio)) {
+          imageAspectRatioEl.value = savedImageAspectRatio;
+        }
+        if (imageAspectRatioEl) {
+          imageAspectRatioEl.addEventListener("change", (e) => {
+            const v = (e.target.value || "").trim();
+            if (allowedImageRatios.has(v)) lsSet(LS_KEYS.testImageAspectRatio, v);
+            else lsSet(LS_KEYS.testImageAspectRatio, "");
+          });
+        }
+        const imageSizeEl = document.getElementById("imageSize");
+        if (imageSizeEl) {
+          imageSizeEl.value = lsGet(LS_KEYS.testImageSize) || "";
+          imageSizeEl.addEventListener("input", (e) => lsSet(LS_KEYS.testImageSize, (e.target.value || "").trim()));
+        }
+
+        const typeEl = document.getElementById("taskType");
+        typeEl.addEventListener("change", async (e) => {
+          const v = e.target.value || "";
+          lsSet(LS_KEYS.testTaskType, v);
+          updateTypeHints();
+          // 切换任务类型后刷新窗口列表
+          await loadTaskWindows(v);
+        });
+
+        // 窗口选择缓存（按 task_type_code 维度保存）
+        const winEl = document.getElementById("taskWindow");
+        if (winEl) {
+          winEl.addEventListener("change", (e) => {
+            const t = (document.getElementById("taskType")?.value || "").trim();
+            if (!t) return;
+            const v = e.target.value || "";
+            if (v) lsSet(mappingLsKey(t), v);
+            else lsDel(mappingLsKey(t));
+          });
+        }
+
+        const cardKeyEl = document.getElementById("cardKeySelect");
+        if (cardKeyEl) {
+          cardKeyEl.addEventListener("change", (e) => {
+            const v = (e.target.value || "").trim();
+            if (v) lsSet(LS_KEYS.testCardKeyId, v);
+            else lsDel(LS_KEYS.testCardKeyId);
+          });
+        }
+
+        await loadApiKey();
+        await loadTaskTypes();
+        await loadCardKeys();
+        updateTypeHints();
+        // 初始载入：根据当前任务类型拉取窗口列表
+        await loadTaskWindows((document.getElementById("taskType")?.value || "").trim());
+
+        // 恢复上次 task_id，并自动查询进度（切回页面也会刷新）
+        const lastTaskId = (lsGet(LS_KEYS.testLastTaskId) || "").trim();
+        if (lastTaskId) {
+          const input = document.getElementById("taskIdInput");
+          if (input) input.value = lastTaskId;
+          const d = await fetchAndRenderTask(lastTaskId, { silent: true });
+          if (d && d.status !== "completed" && d.status !== "failed") {
+            startPoll(lastTaskId);
+          }
+        }
+
+        async function refreshIfNeeded() {
+          const tid = (lsGet(LS_KEYS.testLastTaskId) || "").trim();
+          if (!tid) return;
+          // 如果正在轮询就不额外触发；否则切回时查询一次并按需继续轮询
+          const d = await fetchAndRenderTask(tid, { silent: true });
+          if (autoPollEnabled && d && (d.status !== "completed" && d.status !== "failed") && !pollTimer) {
+            startPoll(tid);
+          }
+          if (d && (d.status === "completed" || d.status === "failed")) {
+            stopPoll();
+          }
+        }
+
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) refreshIfNeeded();
+        });
+        window.addEventListener("focus", () => refreshIfNeeded());
+
+        // 便捷：task_id 输入框回车单次查询
+        const taskIdInput = document.getElementById("taskIdInput");
+        if (taskIdInput) {
+          taskIdInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") queryOnce();
+          });
+        }
+      }
+      init();
+    </script>
+  </body>
+</html>

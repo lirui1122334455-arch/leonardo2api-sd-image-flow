@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>用户管理 - Mirr矩阵</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link href="/assets/admin-nav.css" rel="stylesheet" />
+    <style>
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    </style>
+  </head>
+  <body class="bg-light">
+    <div id="toastContainer" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
+
+    <nav class="navbar navbar-dark bg-dark admin-top-nav">
+      <div class="container-fluid">
+        <a class="navbar-brand" href="/admin/system">Mirr矩阵</a>
+        <div class="navbar-nav me-auto">
+          <a class="nav-link" data-nav="system" href="/admin/system">系统配置</a>
+          <a class="nav-link" data-nav="projects" href="/admin/projects">项目管理</a>
+          <a class="nav-link" data-nav="task_types" href="/admin/task-types">任务类型管理</a>
+          <a class="nav-link" data-nav="tasks" href="/admin/tasks">任务列表</a>
+          <a class="nav-link" data-nav="test" href="/admin/test">测试</a>
+          <a class="nav-link" data-nav="agent" href="/admin/agent">智能体</a>
+          <a class="nav-link" data-nav="paypal" href="/admin/paypal">PayPal管理</a>
+          <a class="nav-link" data-nav="image_resources" href="/admin/image-resources">图片资源</a>
+          <a class="nav-link" data-nav="card_keys" href="/admin/card-keys">卡密管理</a>
+          <a class="nav-link" data-nav="logs" href="/admin/logs">请求日志</a>
+          <a class="nav-link" data-nav="users" href="/admin/users">用户管理</a>
+        </div>
+        <a class="btn btn-outline-info btn-sm me-3" href="https://github.com/lakysir/fpbrowser2api" target="_blank" rel="noopener noreferrer">源码部署</a>
+        <span class="navbar-text text-light small me-3">Telegram：<span class="font-monospace">@newtoken_me</span></span>
+        <a class="btn btn-outline-info btn-sm me-3" href="https://www.newtoken.club/" target="_blank" rel="noopener noreferrer">[官方中转站]</a>
+        <span class="navbar-text text-light small font-monospace me-3" data-role="navbarClock" title="当前时间"></span>
+        <button class="btn btn-outline-light btn-sm" id="btnLogout">退出</button>
+      </div>
+    </nav>
+
+    <div class="container-fluid py-4">
+      <div class="row g-3">
+        <div class="col-12 col-xl-7">
+          <div class="card shadow-sm">
+            <div class="card-body">
+              <div class="d-flex align-items-center mb-2">
+                <h5 class="card-title mb-0">用户列表</h5>
+                <button class="btn btn-outline-secondary btn-sm ms-auto" id="btnRefresh">刷新</button>
+              </div>
+              <div class="table-responsive">
+                <table class="table table-sm align-middle">
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>用户名</th>
+                      <th>密码</th>
+                      <th>角色</th>
+                      <th>功能权限</th>
+                      <th>页面权限</th>
+                    </tr>
+                  </thead>
+                  <tbody id="userBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-12 col-xl-5">
+          <div class="card shadow-sm mb-3">
+            <div class="card-body">
+              <h5 class="card-title">新增用户</h5>
+              <div class="mb-2">
+                <label class="form-label">用户名</label>
+                <input class="form-control" id="newUsername" />
+              </div>
+              <div class="mb-2">
+                <label class="form-label">密码</label>
+                <input class="form-control" id="newPassword" type="password" />
+              </div>
+              <div class="form-check form-switch mb-3">
+                <input class="form-check-input" type="checkbox" id="newIsAdmin" />
+                <label class="form-check-label" for="newIsAdmin">管理员（拥有全部权限）</label>
+              </div>
+              <div class="form-check form-switch mb-3">
+                <input class="form-check-input" type="checkbox" id="newCanSwitchProxy" />
+                <label class="form-check-label" for="newCanSwitchProxy">允许切换代理</label>
+              </div>
+              <button class="btn btn-primary" id="btnCreateUser">创建用户</button>
+            </div>
+          </div>
+
+          <div class="card shadow-sm">
+            <div class="card-body">
+              <h5 class="card-title">编辑权限</h5>
+              <div class="text-muted small mb-2" id="currentUserHint">请先在左侧选择用户</div>
+              <input type="hidden" id="editUserId" />
+
+              <div class="form-check form-switch mb-2">
+                <input class="form-check-input" type="checkbox" id="editIsAdmin" />
+                <label class="form-check-label" for="editIsAdmin">管理员（管理员默认拥有全部页面和数据权限）</label>
+              </div>
+              <div class="form-check form-switch mb-2">
+                <input class="form-check-input" type="checkbox" id="editCanSwitchProxy" />
+                <label class="form-check-label" for="editCanSwitchProxy">允许切换代理（任务类型页面代理列可打开列表切换）</label>
+              </div>
+
+              <div class="mb-2">
+                <label class="form-label">页面权限（不勾选=默认可见全部）</label>
+                <div id="pagePermBox" class="d-flex flex-wrap gap-2"></div>
+              </div>
+
+              <div class="mb-2">
+                <label class="form-label">可管理项目（不选=默认全部可见）</label>
+                <div id="editProjectIdsBox" class="border rounded p-2" style="max-height: 180px; overflow: auto;"></div>
+              </div>
+
+              <div class="mb-2">
+                <label class="form-label">可管理任务类型（不选=默认全部可见）</label>
+                <div id="editTaskTypeIdsBox" class="border rounded p-2" style="max-height: 180px; overflow: auto;"></div>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">重置用户密码</label>
+                <div class="input-group">
+                  <input class="form-control" id="editNewPassword" type="password" placeholder="输入新密码" />
+                  <button class="btn btn-outline-danger" id="btnResetPassword">重置密码</button>
+                </div>
+              </div>
+
+              <button class="btn btn-success" id="btnSavePermissions">保存权限</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script type="module">
+      import { adminFetch, toast, setActiveNav, logout, escapeHtml, initAdminPage } from "/assets/app.js";
+
+      initAdminPage("users");
+      setActiveNav("users");
+      document.getElementById("btnLogout").addEventListener("click", logout);
+
+      const state = {
+        users: [],
+        projects: [],
+        taskTypes: [],
+        pageOptions: [],
+      };
+
+      function selectedValuesByClass(className) {
+        return Array.from(document.querySelectorAll(`.${className}:checked`))
+          .map((el) => parseInt(el.value, 10))
+          .filter((x) => !Number.isNaN(x));
+      }
+
+      function setCheckedValues(className, ids) {
+        const set = new Set((ids || []).map((x) => String(x)));
+        Array.from(document.querySelectorAll(`.${className}`)).forEach((el) => {
+          el.checked = set.has(String(el.value));
+        });
+      }
+
+      function renderPagePerms(selected) {
+        const box = document.getElementById("pagePermBox");
+        const selectedSet = new Set((selected || []).map((x) => String(x)));
+        box.innerHTML = (state.pageOptions || []).map((k) => `
+          <div class="form-check">
+            <input class="form-check-input page-perm" type="checkbox" id="perm_${escapeHtml(k)}" value="${escapeHtml(k)}" ${selectedSet.has(k) ? "checked" : ""} />
+            <label class="form-check-label mono" for="perm_${escapeHtml(k)}">${escapeHtml(k)}</label>
+          </div>
+        `).join("");
+      }
+
+      function renderUserTable() {
+        const body = document.getElementById("userBody");
+        if (!state.users.length) {
+          body.innerHTML = `<tr><td colspan="6" class="text-muted">暂无用户</td></tr>`;
+          return;
+        }
+        body.innerHTML = state.users.map((u) => `
+          <tr data-user-id="${u.id}" class="cursor-pointer">
+            <td class="mono">${u.id}</td>
+            <td>${escapeHtml(u.username || "-")}</td>
+            <td class="mono">${escapeHtml(u.password_display || "******")}</td>
+            <td>${u.is_admin ? `<span class="badge text-bg-danger">管理员</span>` : `<span class="badge text-bg-secondary">普通用户</span>`}</td>
+            <td>${(u.is_admin || u.can_switch_proxy) ? `<span class="badge text-bg-success">可切换代理</span>` : `<span class="badge text-bg-secondary">不可切换代理</span>`}</td>
+            <td class="small">${u.is_admin ? "全部" : (u.page_permissions?.length ? escapeHtml(u.page_permissions.join(", ")) : "默认全部")}</td>
+          </tr>
+        `).join("");
+
+        body.querySelectorAll("tr[data-user-id]").forEach((tr) => {
+          tr.addEventListener("click", () => {
+            const uid = parseInt(tr.getAttribute("data-user-id"), 10);
+            const user = state.users.find((x) => Number(x.id) === Number(uid));
+            if (user) fillEditForm(user);
+          });
+        });
+      }
+
+      function fillSelectOptions() {
+        const pbox = document.getElementById("editProjectIdsBox");
+        pbox.innerHTML = state.projects.map((p) => `
+          <div class="form-check">
+            <input class="form-check-input edit-project-id" type="checkbox" id="pid_${p.id}" value="${p.id}" />
+            <label class="form-check-label mono" for="pid_${p.id}">#${p.id} ${escapeHtml(p.name || "-")}</label>
+          </div>
+        `).join("");
+        const tbox = document.getElementById("editTaskTypeIdsBox");
+        tbox.innerHTML = state.taskTypes.map((t) => `
+          <div class="form-check">
+            <input class="form-check-input edit-task-type-id" type="checkbox" id="ttid_${t.id}" value="${t.id}" />
+            <label class="form-check-label mono" for="ttid_${t.id}">#${t.id} ${escapeHtml(t.name || t.code || "-")} (${escapeHtml(t.code || "-")})</label>
+          </div>
+        `).join("");
+      }
+
+      function fillEditForm(user) {
+        document.getElementById("editUserId").value = String(user.id || "");
+        document.getElementById("currentUserHint").textContent = `当前用户：${user.username || "-"}（ID=${user.id}）`;
+        document.getElementById("editIsAdmin").checked = !!user.is_admin;
+        document.getElementById("editCanSwitchProxy").checked = !!user.can_switch_proxy || !!user.is_admin;
+        setCheckedValues("edit-project-id", user.project_ids || []);
+        setCheckedValues("edit-task-type-id", user.task_type_ids || []);
+        renderPagePerms(user.page_permissions || []);
+      }
+
+      function getCurrentEditUserId() {
+        const uid = parseInt(document.getElementById("editUserId").value, 10);
+        return Number.isNaN(uid) ? null : uid;
+      }
+
+      async function loadBasics() {
+        const [rp, rt] = await Promise.all([
+          adminFetch("/api/admin/projects"),
+          adminFetch("/api/admin/task-types"),
+        ]);
+        if (rp) {
+          const dp = await rp.json();
+          state.projects = Array.isArray(dp.projects) ? dp.projects : [];
+        }
+        if (rt) {
+          const dt = await rt.json();
+          state.taskTypes = Array.isArray(dt.task_types) ? dt.task_types : [];
+        }
+        fillSelectOptions();
+      }
+
+      async function loadUsers(preferredUserId = null) {
+        const r = await adminFetch("/api/admin/users");
+        if (!r) return;
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || "加载用户失败");
+        state.users = Array.isArray(d.items) ? d.items : [];
+        state.pageOptions = Array.isArray(d.page_options) ? d.page_options : [];
+        renderUserTable();
+        const targetUserId = preferredUserId ?? getCurrentEditUserId();
+        const targetUser = targetUserId == null
+          ? null
+          : state.users.find((u) => Number(u.id) === Number(targetUserId));
+        if (targetUser) {
+          fillEditForm(targetUser);
+        } else if (state.users[0]) {
+          fillEditForm(state.users[0]);
+        }
+      }
+
+      async function createUser() {
+        const username = document.getElementById("newUsername").value.trim();
+        const password = document.getElementById("newPassword").value;
+        const isAdmin = document.getElementById("newIsAdmin").checked;
+        const canSwitchProxy = document.getElementById("newCanSwitchProxy").checked;
+        if (!username || !password) throw new Error("请填写用户名和密码");
+        const r = await adminFetch("/api/admin/users", {
+          method: "POST",
+          body: JSON.stringify({ username, password, is_admin: isAdmin, can_switch_proxy: canSwitchProxy, page_permissions: [], project_ids: [], task_type_ids: [] }),
+        });
+        if (!r) return;
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || "创建用户失败");
+        toast("用户创建成功", "success");
+        document.getElementById("newUsername").value = "";
+        document.getElementById("newPassword").value = "";
+        document.getElementById("newIsAdmin").checked = false;
+        document.getElementById("newCanSwitchProxy").checked = false;
+        await loadUsers();
+      }
+
+      async function savePermissions() {
+        const uid = parseInt(document.getElementById("editUserId").value, 10);
+        if (!uid) throw new Error("请先选择用户");
+        const isAdmin = document.getElementById("editIsAdmin").checked;
+        const canSwitchProxy = document.getElementById("editCanSwitchProxy").checked;
+        const pagePermissions = Array.from(document.querySelectorAll(".page-perm:checked")).map((el) => String(el.value || "").trim()).filter(Boolean);
+        const projectIds = selectedValuesByClass("edit-project-id");
+        const taskTypeIds = selectedValuesByClass("edit-task-type-id");
+        const r = await adminFetch(`/api/admin/users/${uid}/permissions`, {
+          method: "PUT",
+          body: JSON.stringify({
+            is_admin: isAdmin,
+            can_switch_proxy: canSwitchProxy,
+            page_permissions: pagePermissions,
+            project_ids: projectIds,
+            task_type_ids: taskTypeIds,
+          }),
+        });
+        if (!r) return;
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || "保存权限失败");
+        toast("权限已保存", "success");
+        await loadUsers(uid);
+      }
+
+      async function resetPassword() {
+        const uid = parseInt(document.getElementById("editUserId").value, 10);
+        const newPassword = document.getElementById("editNewPassword").value;
+        if (!uid) throw new Error("请先选择用户");
+        if (!newPassword) throw new Error("请输入新密码");
+        const r = await adminFetch(`/api/admin/users/${uid}/password`, {
+          method: "PUT",
+          body: JSON.stringify({ new_password: newPassword }),
+        });
+        if (!r) return;
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || "重置密码失败");
+        document.getElementById("editNewPassword").value = "";
+        toast("密码已重置", "success");
+      }
+
+      document.getElementById("btnRefresh").addEventListener("click", async () => {
+        try {
+          await loadUsers();
+          toast("已刷新", "success");
+        } catch (e) {
+          toast(e.message || "刷新失败", "error");
+        }
+      });
+      document.getElementById("btnCreateUser").addEventListener("click", async () => {
+        try { await createUser(); } catch (e) { toast(e.message || "创建失败", "error"); }
+      });
+      document.getElementById("btnSavePermissions").addEventListener("click", async () => {
+        try { await savePermissions(); } catch (e) { toast(e.message || "保存失败", "error"); }
+      });
+      document.getElementById("btnResetPassword").addEventListener("click", async () => {
+        try { await resetPassword(); } catch (e) { toast(e.message || "重置失败", "error"); }
+      });
+
+      Promise.resolve().then(loadBasics).then(loadUsers).catch((e) => {
+        toast(e.message || "初始化失败", "error");
+      });
+    </script>
+  </body>
+</html>

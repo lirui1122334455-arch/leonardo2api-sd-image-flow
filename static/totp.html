@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>2FA Code 生成 - Mirr矩阵</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link href="/assets/admin-nav.css" rel="stylesheet" />
+    <style>
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+      .code-box { font-size: 3rem; letter-spacing: .22em; font-weight: 800; }
+      .secret-box { min-height: 96px; }
+    </style>
+  </head>
+  <body class="bg-light">
+    <div id="toastContainer" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
+
+    <nav class="navbar navbar-dark bg-dark admin-top-nav">
+      <div class="container-fluid">
+        <a class="navbar-brand" href="/admin/system">Mirr矩阵</a>
+        <div class="navbar-nav me-auto">
+          <a class="nav-link" data-nav="system" href="/admin/system">系统配置</a>
+          <a class="nav-link" data-nav="projects" href="/admin/projects">项目管理</a>
+          <a class="nav-link" data-nav="task_types" href="/admin/task-types">任务类型管理</a>
+          <a class="nav-link" data-nav="tasks" href="/admin/tasks">任务列表</a>
+          <a class="nav-link" data-nav="test" href="/admin/test">测试</a>
+          <a class="nav-link" data-nav="agent" href="/admin/agent">智能体</a>
+          <a class="nav-link" data-nav="paypal" href="/admin/paypal">PayPal管理</a>
+          <a class="nav-link" data-nav="image_resources" href="/admin/image-resources">图片资源</a>
+          <a class="nav-link" data-nav="card_keys" href="/admin/card-keys">卡密管理</a>
+          <a class="nav-link" data-nav="logs" href="/admin/logs">请求日志</a>
+          <a class="nav-link" data-nav="users" href="/admin/users">用户管理</a>
+        </div>
+        <a class="btn btn-outline-info btn-sm me-3" href="https://github.com/lakysir/fpbrowser2api" target="_blank" rel="noopener noreferrer">源码部署</a>
+        <span class="navbar-text text-light small me-3">Telegram：<span class="font-monospace">@newtoken_me</span></span>
+        <a class="btn btn-outline-info btn-sm me-3" href="https://www.newtoken.club/" target="_blank" rel="noopener noreferrer">[官方中转站]</a>
+        <span class="navbar-text text-light small font-monospace me-3" data-role="navbarClock" title="当前时间"></span>
+        <button class="btn btn-outline-light btn-sm" id="btnLogout">退出</button>
+      </div>
+    </nav>
+
+    <div class="container py-4">
+      <div class="d-flex align-items-center mb-3">
+        <h4 class="mb-0">2FA Code 生成工具</h4>
+        <a class="btn btn-outline-secondary btn-sm ms-auto" href="/admin/card-keys">返回卡密管理</a>
+      </div>
+
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <div class="mb-3">
+            <label class="form-label fw-semibold" for="secretInput">2FA Secret</label>
+            <textarea class="form-control mono secret-box" id="secretInput" placeholder="输入 Google 2FA / TOTP Secret，例如：JBSWY3DPEHPK3PXP&#10;支持空格、短横线，会自动清理"></textarea>
+            <div class="form-text">按 sora_plus_register_executor.py 中 _generate_totp_code / _generate_fresh_totp_code 同源逻辑：Base32 解码 + HMAC-SHA1 + 30 秒周期 + 6 位数字。</div>
+          </div>
+
+          <div class="row g-3 align-items-end">
+            <div class="col-md-4">
+              <label class="form-label" for="previousCodeInput">上一次 Code（可选）</label>
+              <input class="form-control mono" id="previousCodeInput" maxlength="12" placeholder="用于等待生成不同 Code" />
+            </div>
+            <div class="col-md-4">
+              <label class="form-label" for="periodInput">周期（秒）</label>
+              <input class="form-control mono" id="periodInput" type="number" min="1" step="1" value="30" />
+            </div>
+            <div class="col-md-4 d-flex gap-2">
+              <button class="btn btn-primary flex-fill" id="btnGenerate">生成Code</button>
+              <button class="btn btn-outline-success" id="btnCopy" disabled>复制</button>
+            </div>
+          </div>
+
+          <hr />
+
+          <div class="text-center py-3">
+            <div class="text-muted small mb-2" id="statusText">请输入 2FA Secret 后点击生成</div>
+            <div class="mono code-box text-primary user-select-all" id="codeOutput">------</div>
+            <div class="progress mt-3" role="progressbar" aria-label="TOTP 剩余时间">
+              <div class="progress-bar" id="timeProgress" style="width: 0%"></div>
+            </div>
+            <div class="text-muted small mt-2 mono" id="timeText">剩余 -- 秒</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script type="module">
+      import { toast, setActiveNav, logout, initAdminPage } from "/assets/app.js";
+
+      initAdminPage("card_keys");
+      setActiveNav("card_keys");
+      document.getElementById("btnLogout").addEventListener("click", logout);
+
+      const $ = (id) => document.getElementById(id);
+      let lastGeneratedCode = "";
+      let waiting = false;
+
+      function normalizeSecret(secret) {
+        return String(secret || "").trim().replace(/[\s-]/g, "").toUpperCase();
+      }
+
+      function base32Decode(secret) {
+        const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        const s = normalizeSecret(secret).replace(/=+$/g, "");
+        if (!s) throw new Error("EFA(2FA Secret) 为空，无法生成验证码");
+        let bits = 0;
+        let value = 0;
+        const out = [];
+        for (const ch of s) {
+          const idx = alphabet.indexOf(ch);
+          if (idx < 0) throw new Error(`EFA(2FA Secret) 非法，无法 Base32 解码：包含非法字符 ${ch}`);
+          value = (value << 5) | idx;
+          bits += 5;
+          if (bits >= 8) {
+            out.push((value >>> (bits - 8)) & 0xff);
+            bits -= 8;
+          }
+        }
+        return new Uint8Array(out);
+      }
+
+      function concatBytes(...arrays) {
+        const total = arrays.reduce((n, a) => n + a.length, 0);
+        const out = new Uint8Array(total);
+        let offset = 0;
+        for (const a of arrays) {
+          out.set(a, offset);
+          offset += a.length;
+        }
+        return out;
+      }
+
+      function sha1(bytes) {
+        const ml = bytes.length * 8;
+        const withOne = bytes.length + 1;
+        const padLen = (withOne % 64 <= 56) ? (56 - (withOne % 64)) : (120 - (withOne % 64));
+        const data = new Uint8Array(withOne + padLen + 8);
+        data.set(bytes);
+        data[bytes.length] = 0x80;
+        const view = new DataView(data.buffer);
+        view.setUint32(data.length - 8, Math.floor(ml / 0x100000000), false);
+        view.setUint32(data.length - 4, ml >>> 0, false);
+
+        let h0 = 0x67452301;
+        let h1 = 0xefcdab89;
+        let h2 = 0x98badcfe;
+        let h3 = 0x10325476;
+        let h4 = 0xc3d2e1f0;
+        const w = new Uint32Array(80);
+        const rotl = (n, s) => ((n << s) | (n >>> (32 - s))) >>> 0;
+
+        for (let i = 0; i < data.length; i += 64) {
+          for (let j = 0; j < 16; j++) w[j] = view.getUint32(i + j * 4, false);
+          for (let j = 16; j < 80; j++) w[j] = rotl(w[j - 3] ^ w[j - 8] ^ w[j - 14] ^ w[j - 16], 1);
+          let a = h0, b = h1, c = h2, d = h3, e = h4;
+          for (let j = 0; j < 80; j++) {
+            let f, k;
+            if (j < 20) { f = (b & c) | ((~b) & d); k = 0x5a827999; }
+            else if (j < 40) { f = b ^ c ^ d; k = 0x6ed9eba1; }
+            else if (j < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8f1bbcdc; }
+            else { f = b ^ c ^ d; k = 0xca62c1d6; }
+            const temp = (rotl(a, 5) + f + e + k + w[j]) >>> 0;
+            e = d; d = c; c = rotl(b, 30); b = a; a = temp;
+          }
+          h0 = (h0 + a) >>> 0;
+          h1 = (h1 + b) >>> 0;
+          h2 = (h2 + c) >>> 0;
+          h3 = (h3 + d) >>> 0;
+          h4 = (h4 + e) >>> 0;
+        }
+        const out = new Uint8Array(20);
+        const ov = new DataView(out.buffer);
+        [h0, h1, h2, h3, h4].forEach((h, i) => ov.setUint32(i * 4, h, false));
+        return out;
+      }
+
+      function hmacSha1(key, msg) {
+        const blockSize = 64;
+        let k = key;
+        if (k.length > blockSize) k = sha1(k);
+        const keyBlock = new Uint8Array(blockSize);
+        keyBlock.set(k);
+        const oKey = new Uint8Array(blockSize);
+        const iKey = new Uint8Array(blockSize);
+        for (let i = 0; i < blockSize; i++) {
+          oKey[i] = keyBlock[i] ^ 0x5c;
+          iKey[i] = keyBlock[i] ^ 0x36;
+        }
+        return sha1(concatBytes(oKey, sha1(concatBytes(iKey, msg))));
+      }
+
+      function generateTotpCode(secret, { digits = 6, periodSeconds = 30 } = {}) {
+        const key = base32Decode(secret);
+        const period = Math.max(1, Number(periodSeconds) || 30);
+        const counter = Math.floor(Date.now() / 1000 / period);
+        const msg = new Uint8Array(8);
+        const view = new DataView(msg.buffer);
+        view.setUint32(0, Math.floor(counter / 0x100000000), false);
+        view.setUint32(4, counter >>> 0, false);
+        const digest = hmacSha1(key, msg);
+        const offset = digest[digest.length - 1] & 0x0f;
+        const codeInt = (((digest[offset] & 0x7f) << 24) | ((digest[offset + 1] & 0xff) << 16) | ((digest[offset + 2] & 0xff) << 8) | (digest[offset + 3] & 0xff)) >>> 0;
+        return String(codeInt % (10 ** Number(digits))).padStart(Number(digits), "0");
+      }
+
+      async function generateFreshTotpCode(secret, previousCode) {
+        const old = String(previousCode || "").trim();
+        const period = Math.max(1, Number($("periodInput").value) || 30);
+        let cur = generateTotpCode(secret, { periodSeconds: period });
+        if (cur !== old) return cur;
+        for (let i = 0; i < 35; i++) {
+          $("statusText").textContent = `当前 Code 与上一次相同，等待新周期... ${i + 1}/35`;
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          cur = generateTotpCode(secret, { periodSeconds: period });
+          if (cur !== old) return cur;
+        }
+        return cur;
+      }
+
+      function updateCountdown() {
+        const period = Math.max(1, Number($("periodInput").value) || 30);
+        const nowSec = Math.floor(Date.now() / 1000);
+        const remain = period - (nowSec % period);
+        const usedPct = ((period - remain) / period) * 100;
+        $("timeProgress").style.width = `${Math.max(0, Math.min(100, usedPct))}%`;
+        $("timeText").textContent = `剩余 ${remain} 秒`;
+      }
+
+      async function copyToClipboard(text) {
+        if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.cssText = "position:fixed;left:-9999px;top:-9999px;opacity:0";
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); }
+        finally { document.body.removeChild(ta); }
+      }
+
+      async function onGenerate() {
+        if (waiting) return;
+        const secret = $("secretInput").value;
+        if (!normalizeSecret(secret)) {
+          toast("请先输入 2FA Secret", "warn");
+          return;
+        }
+        waiting = true;
+        $("btnGenerate").disabled = true;
+        $("btnGenerate").textContent = "生成中...";
+        $("btnCopy").disabled = true;
+        try {
+          const code = await generateFreshTotpCode(secret, $("previousCodeInput").value);
+          lastGeneratedCode = code;
+          $("codeOutput").textContent = code;
+          $("previousCodeInput").value = code;
+          $("btnCopy").disabled = false;
+          $("statusText").textContent = `已生成：${new Date().toLocaleString()}`;
+          toast("Code 生成成功", "success");
+        } catch (err) {
+          $("statusText").textContent = err?.message || "生成失败";
+          toast(err?.message || "生成失败", "error");
+        } finally {
+          waiting = false;
+          $("btnGenerate").disabled = false;
+          $("btnGenerate").textContent = "生成Code";
+        }
+      }
+
+      $("btnGenerate").addEventListener("click", onGenerate);
+      $("btnCopy").addEventListener("click", async () => {
+        if (!lastGeneratedCode) return;
+        try {
+          await copyToClipboard(lastGeneratedCode);
+          toast("已复制到剪贴板", "success");
+        } catch (err) {
+          toast(`复制失败：${err?.message || "请检查浏览器权限"}`, "error");
+        }
+      });
+      $("secretInput").addEventListener("keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") onGenerate();
+      });
+      setInterval(updateCountdown, 500);
+      updateCountdown();
+    </script>
+  </body>
+</html>
