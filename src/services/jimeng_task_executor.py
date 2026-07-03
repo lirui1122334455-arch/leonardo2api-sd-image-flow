@@ -90,25 +90,36 @@ DEFAULT_DREAMINA_TARGET = "https://dreamina.capcut.com/ai-tool/video/generate"
 # Seedance 2.0 模型名称（来自 jimeng-api VIDEO_MODEL_MAP）
 _MODEL_SEEDANCE_20_PRO = "dreamina_seedance_40_pro"
 _MODEL_SEEDANCE_20_FAST = "dreamina_seedance_40"
+_MODEL_SEEDANCE_20_MINI = "dreamina_seedance_40_mini"
 _DREAMINA_MODEL_ALIASES: Dict[str, str] = {
     "seedance-2": _MODEL_SEEDANCE_20_PRO,
     "seedance-2-pro": _MODEL_SEEDANCE_20_PRO,
     "seedance-2-fast": _MODEL_SEEDANCE_20_FAST,
+    "seedance-2-mini": _MODEL_SEEDANCE_20_MINI,
     "seedance_2": _MODEL_SEEDANCE_20_PRO,
     "seedance_2_pro": _MODEL_SEEDANCE_20_PRO,
     "seedance_2_fast": _MODEL_SEEDANCE_20_FAST,
+    "seedance_2_mini": _MODEL_SEEDANCE_20_MINI,
     "jimeng-video-seedance-2.0": _MODEL_SEEDANCE_20_PRO,
     "jimeng-video-seedance-2.0-pro": _MODEL_SEEDANCE_20_PRO,
     "jimeng-video-seedance-2.0-fast": _MODEL_SEEDANCE_20_FAST,
+    "jimeng-video-seedance-2.0-mini": _MODEL_SEEDANCE_20_MINI,
     "seedance-2.0": _MODEL_SEEDANCE_20_PRO,
     "seedance-2.0-pro": _MODEL_SEEDANCE_20_PRO,
     "seedance-2.0-fast": _MODEL_SEEDANCE_20_FAST,
+    "seedance-2.0-mini": _MODEL_SEEDANCE_20_MINI,
     "seedance_2_0": _MODEL_SEEDANCE_20_PRO,
     "seedance_2_0_fast": _MODEL_SEEDANCE_20_FAST,
+    "seedance_2_0_mini": _MODEL_SEEDANCE_20_MINI,
+    "dreamina seedance 2.0": _MODEL_SEEDANCE_20_PRO,
+    "dreamina seedance 2.0 fast": _MODEL_SEEDANCE_20_FAST,
+    "dreamina seedance 2.0 mini": _MODEL_SEEDANCE_20_MINI,
     "dreamina_seedance_40_pro": _MODEL_SEEDANCE_20_PRO,
     "dreamina_seedance_40": _MODEL_SEEDANCE_20_FAST,
+    "dreamina_seedance_40_mini": _MODEL_SEEDANCE_20_MINI,
 }
 _SEEDANCE_BENEFIT_FAST_T2V_OUTPUT = "seedance_20_fast_720p_output"
+_SEEDANCE_BENEFIT_MINI_OUTPUT = "seedance_20_mini_720p_output"
 _SEEDANCE_BENEFIT_PRO_OUTPUT = "seedance_20_pro_720p_output"
 
 _DREAMINA_COMMERCE_BASE = "https://commerce.us.capcut.com"
@@ -117,6 +128,11 @@ _DREAMINA_MIN_CREDIT = 255;#最小的dreamina积分才启动
 _DREAMINA_GIFT_CREDIT = 120;
 
 _DREAMINA_SESSIONS: Dict[str, "DreaminaSession"] = {}
+_DREAMINA_MATERIAL_TYPE_CODES: Dict[str, int] = {
+    "image": 1,
+    "video": 2,
+    "audio": 3,
+}
 
 
 def _dreamina_key(vendor: str, base_url: str, space_id: str, window_key: str) -> str:
@@ -125,6 +141,15 @@ def _dreamina_key(vendor: str, base_url: str, space_id: str, window_key: str) ->
 
 def _one_str(v: Any) -> str:
     return str(v or "").strip()
+
+
+def _dreamina_bool(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    s = _one_str(v).lower()
+    return s in ("1", "true", "yes", "y", "on")
 
 
 def _compact_json(v: Any) -> str:
@@ -353,26 +378,34 @@ def _dreamina_resolve_aspect_ratio(payload: Dict[str, Any]) -> str:
 def _dreamina_resolve_duration(payload: Dict[str, Any]) -> int:
     p = payload or {}
     if p.get("duration") is None or _one_str(p.get("duration")) == "":
-        raise NonPenalizedTaskError("payload.duration 不能为空，仅支持 15 秒", status_code=422, content_violation=True)
+        raise NonPenalizedTaskError("payload.duration 不能为空，仅支持 4-15 秒", status_code=422, content_violation=True)
     try:
         v = int(float(p.get("duration")))
     except (TypeError, ValueError):
-        raise NonPenalizedTaskError("payload.duration 格式错误，仅支持 15 秒", status_code=422, content_violation=True)
-    if v != 15:
-        raise NonPenalizedTaskError("payload.duration 仅支持 15 秒", status_code=422, content_violation=True)
+        raise NonPenalizedTaskError("payload.duration 格式错误，仅支持 4-15 秒", status_code=422, content_violation=True)
+    if v < 4 or v > 15:
+        raise NonPenalizedTaskError("payload.duration 仅支持 4-15 秒", status_code=422, content_violation=True)
     return v
 
 
-def _dreamina_resolve_resolution(payload: Dict[str, Any]) -> str:
+def _dreamina_allowed_resolutions(model_name: str) -> Tuple[str, ...]:
+    if _dreamina_is_seedance20_pro(model_name):
+        return ("720p", "1080p", "4k")
+    return ("720p",)
+
+
+def _dreamina_resolve_resolution(payload: Dict[str, Any], model_name: str = "") -> str:
     raw = _one_str((payload or {}).get("resolution") or (payload or {}).get("quality_resolution") or "720p").lower()
-    return raw if raw in ("480p", "720p", "1080p") else "720p"
+    allowed = _dreamina_allowed_resolutions(model_name or _dreamina_resolve_model(payload, has_image=False))
+    return raw if raw in allowed else allowed[0]
 
 
 def _dreamina_resolution_size(resolution: str, ratio: str) -> Tuple[int, int]:
     table = {
-        "480p": {"1:1": (480, 480), "4:3": (640, 480), "3:4": (480, 640), "16:9": (854, 480), "9:16": (480, 854)},
-        "720p": {"1:1": (720, 720), "4:3": (960, 720), "3:4": (720, 960), "16:9": (1280, 720), "9:16": (720, 1280)},
-        "1080p": {"1:1": (1080, 1080), "4:3": (1440, 1080), "3:4": (1080, 1440), "16:9": (1920, 1080), "9:16": (1080, 1920)},
+        "480p": {"1:1": (480, 480), "4:3": (640, 480), "3:4": (480, 640), "16:9": (854, 480), "9:16": (480, 854), "21:9": (1120, 480)},
+        "720p": {"1:1": (720, 720), "4:3": (960, 720), "3:4": (720, 960), "16:9": (1280, 720), "9:16": (720, 1280), "21:9": (1680, 720)},
+        "1080p": {"1:1": (1080, 1080), "4:3": (1440, 1080), "3:4": (1080, 1440), "16:9": (1920, 1080), "9:16": (1080, 1920), "21:9": (2520, 1080)},
+        "4k": {"1:1": (2160, 2160), "4:3": (2880, 2160), "3:4": (2160, 2880), "16:9": (3840, 2160), "9:16": (2160, 3840), "21:9": (5120, 2160)},
     }
     return table.get(resolution, table["720p"]).get(ratio, table.get(resolution, table["720p"])["16:9"])
 
@@ -389,7 +422,11 @@ def _dreamina_resolve_model(payload: Dict[str, Any], has_image: bool) -> str:
 
 def _dreamina_is_seedance20_fast(model_name: str) -> bool:
     m = _one_str(model_name)
-    return "40" in m and "40_pro" not in m
+    return "40" in m and "40_pro" not in m and "40_mini" not in m
+
+
+def _dreamina_is_seedance20_mini(model_name: str) -> bool:
+    return "40_mini" in _one_str(model_name)
 
 
 def _dreamina_is_seedance20_pro(model_name: str) -> bool:
@@ -499,6 +536,35 @@ async def dreamina_fetch_sessionid_in_window(
         if not sessionid:
             raise RuntimeError("读取 Cookies 失败：未找到 sessionid（请确认窗口已登录 Dreamina/CapCut）")
         return {"access_token": sessionid, "expires": expires, "cookie_name": "sessionid"}
+
+
+async def _dreamina_read_sessionid_from_context(ctx: Any) -> Dict[str, Any]:
+    """Best-effort read of Dreamina/CapCut sessionid cookie from an open context."""
+    if ctx is None:
+        return {}
+    try:
+        cookies = await ctx.cookies("https://dreamina.capcut.com", "https://www.capcut.com")
+    except TypeError:
+        cookies = await ctx.cookies()
+    except Exception:
+        return {}
+
+    for item in cookies or []:
+        if str((item or {}).get("name") or "") != "sessionid":
+            continue
+        sessionid = _one_str((item or {}).get("value"))
+        if not sessionid:
+            continue
+        expires: Optional[str] = None
+        exp_raw = (item or {}).get("expires")
+        try:
+            exp_num = float(exp_raw)
+            if exp_num > 0:
+                expires = datetime.datetime.fromtimestamp(exp_num, datetime.timezone.utc).isoformat()
+        except Exception:
+            expires = None
+        return {"access_token": sessionid, "expires": expires, "cookie_name": "sessionid"}
+    return {}
 
 def _dreamina_value_list(v: Any) -> List[Any]:
     if v is None:
@@ -621,8 +687,8 @@ def _dreamina_ref_direct_uri(ref: Dict[str, Any]) -> str:
 
 def _dreamina_require_https_image_ref(ref: Dict[str, Any], *, label: str = "参考图片") -> None:
     src = _one_str(ref.get("source") or ref.get("url") or ref.get("image_url") or ref.get("imageUrl"))
-    if not src.lower().startswith("https://"):
-        raise NonPenalizedTaskError(f"{label}仅支持 https 图片地址", status_code=422, content_violation=True)
+    if not (src.lower().startswith("https://") or _dreamina_local_path_from_source(src) is not None):
+        raise NonPenalizedTaskError(f"{label}仅支持 https 图片地址或本机文件路径", status_code=422, content_violation=True)
 
 
 def _dreamina_image_ref_dedupe_key(ref: Dict[str, Any]) -> str:
@@ -744,10 +810,179 @@ def _dreamina_collect_external_omni_image_refs(payload: Dict[str, Any]) -> List[
     refs = []
     for ref in _dreamina_collect_omni_image_refs(payload):
         src = _one_str(ref.get("source") or ref.get("url") or ref.get("image_url") or ref.get("imageUrl"))
-        if not src.lower().startswith("https://"):
-            raise NonPenalizedTaskError("Omni reference 仅支持 https 图片地址", status_code=422, content_violation=True)
+        if not (src.lower().startswith("https://") or _dreamina_local_path_from_source(src) is not None):
+            raise NonPenalizedTaskError("Omni reference 仅支持 https 图片地址或本机文件路径", status_code=422, content_violation=True)
         refs.append(ref)
     return refs
+
+
+def _dreamina_media_duration_seconds(v: Any, *, default: float = 0.0) -> float:
+    if v is None or _one_str(v) == "":
+        return float(default)
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return float(default)
+    if n > 1000:
+        return n / 1000.0
+    return n
+
+
+def _dreamina_extract_media_ref(v: Any, *, media_kind: str, field_name: str) -> Optional[Dict[str, Any]]:
+    if v is None:
+        return None
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        if s.startswith("{"):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, dict):
+                    return _dreamina_extract_media_ref(parsed, media_kind=media_kind, field_name=field_name)
+            except Exception:
+                pass
+        is_url_or_path = bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", s) or re.match(r"^[a-zA-Z]:[\\/]", s))
+        return {
+            "source": s if is_url_or_path else "",
+            "field_name": field_name,
+            "name": field_name,
+            "vid": "" if is_url_or_path else s,
+            "duration_seconds": 0.0,
+        }
+    if not isinstance(v, dict):
+        return _dreamina_extract_media_ref(_one_str(v), media_kind=media_kind, field_name=field_name)
+
+    nested_key = "video_info" if media_kind == "video" else "audio_info"
+    if isinstance(v.get(nested_key), dict):
+        merged = dict(v.get(nested_key) or {})
+        for k, val in v.items():
+            if k != nested_key and merged.get(k) is None:
+                merged[k] = val
+        return _dreamina_extract_media_ref(merged, media_kind=media_kind, field_name=field_name)
+
+    url_keys = (
+        ("url", "src", "video_url", "videoUrl", "reference_video_url", "referenceVideoUrl")
+        if media_kind == "video"
+        else ("url", "src", "audio_url", "audioUrl", "reference_audio_url", "referenceAudioUrl")
+    )
+    vid = _one_str(
+        v.get("vid")
+        or v.get("video_id")
+        or v.get("videoId")
+        or v.get("videoID")
+        or v.get("file_id")
+        or v.get("fileId")
+    )
+    source = ""
+    for key in url_keys:
+        source = _one_str(v.get(key))
+        if source:
+            break
+    if not vid and source and not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", source) and not re.match(r"^[a-zA-Z]:[\\/]", source):
+        vid = source
+        source = ""
+    name = _one_str(v.get("name") or v.get("filename") or v.get("file_name") or v.get("title") or field_name)
+    duration = _dreamina_media_duration_seconds(
+        v.get("duration")
+        if v.get("duration") is not None
+        else (v.get("duration_seconds") if v.get("duration_seconds") is not None else v.get("durationSeconds")),
+        default=0.0,
+    )
+    if duration <= 0:
+        duration = _dreamina_media_duration_seconds(
+            v.get("duration_ms") if v.get("duration_ms") is not None else v.get("durationMs"),
+            default=0.0,
+        )
+    return {
+        "source": source,
+        "field_name": _one_str(v.get("field_name") or v.get("fieldName") or field_name),
+        "name": name,
+        "vid": vid,
+        "duration_seconds": duration,
+        "width": int(v.get("width") or 0),
+        "height": int(v.get("height") or 0),
+        "fps": float(v.get("fps") or 0),
+        "cover_image_url": _one_str(v.get("cover_image_url") or v.get("coverImageUrl") or v.get("cover_url") or v.get("coverUrl")),
+        "source_from": _one_str(v.get("source_from") or v.get("sourceFrom") or "upload"),
+    }
+
+
+def _dreamina_collect_video_refs(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    p = payload or {}
+    refs: List[Dict[str, Any]] = []
+
+    def add(item: Any, field_name: str) -> None:
+        ref = _dreamina_extract_media_ref(item, media_kind="video", field_name=field_name)
+        if ref:
+            refs.append(ref)
+
+    for i in range(1, 4):
+        k = f"video_file_{i}"
+        if p.get(k) is not None:
+            add(p.get(k), k)
+    if p.get("video_file") is not None:
+        add(p.get("video_file"), "video_file")
+    for k in ("videos", "video_urls", "videoUrls", "video_vids", "videoVids", "reference_videos", "referenceVideos", "reference_video_urls", "referenceVideoUrls", "reference_video_vids", "referenceVideoVids"):
+        for item in _dreamina_value_list(p.get(k)):
+            add(item, f"video_file_{len(refs) + 1}")
+    for k in ("reference_video_url", "referenceVideoUrl", "video_vid", "videoVid", "reference_video_vid", "referenceVideoVid"):
+        if p.get(k) is not None:
+            add(p.get(k), f"video_file_{len(refs) + 1}")
+
+    if len(refs) > 3:
+        raise NonPenalizedTaskError("Dreamina supports at most 3 reference videos", status_code=400, content_violation=True)
+    total = 0.0
+    for i, ref in enumerate(refs, start=1):
+        duration = float(ref.get("duration_seconds") or 0.0)
+        if duration <= 0:
+            raise NonPenalizedTaskError(f"Dreamina video {i} requires duration seconds", status_code=422, content_violation=True)
+        total += duration
+    if total > 15.0 + 1e-6:
+        raise NonPenalizedTaskError("Dreamina reference videos total duration must be <= 15 seconds", status_code=400, content_violation=True)
+    return refs
+
+
+def _dreamina_collect_audio_refs(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    p = payload or {}
+    refs: List[Dict[str, Any]] = []
+
+    def add(item: Any, field_name: str) -> None:
+        ref = _dreamina_extract_media_ref(item, media_kind="audio", field_name=field_name)
+        if ref:
+            refs.append(ref)
+
+    for i in range(1, 4):
+        k = f"audio_file_{i}"
+        if p.get(k) is not None:
+            add(p.get(k), k)
+    if p.get("audio_file") is not None:
+        add(p.get("audio_file"), "audio_file")
+    for k in ("audios", "audio_urls", "audioUrls", "audio_vids", "audioVids", "reference_audios", "referenceAudios", "reference_audio_urls", "referenceAudioUrls", "reference_audio_vids", "referenceAudioVids"):
+        for item in _dreamina_value_list(p.get(k)):
+            add(item, f"audio_file_{len(refs) + 1}")
+    for k in ("reference_audio_url", "referenceAudioUrl", "audio_vid", "audioVid", "reference_audio_vid", "referenceAudioVid"):
+        if p.get(k) is not None:
+            add(p.get(k), f"audio_file_{len(refs) + 1}")
+
+    if len(refs) > 3:
+        raise NonPenalizedTaskError("Dreamina supports at most 3 reference audios", status_code=400, content_violation=True)
+    total = 0.0
+    for i, ref in enumerate(refs, start=1):
+        duration = float(ref.get("duration_seconds") or 0.0)
+        if duration <= 0:
+            raise NonPenalizedTaskError(f"Dreamina audio {i} requires duration seconds", status_code=422, content_violation=True)
+        total += duration
+    if refs and (total < 2.0 - 1e-6 or total > 15.0 + 1e-6):
+        raise NonPenalizedTaskError("Dreamina reference audios total duration must be >= 2 and <= 15 seconds", status_code=400, content_violation=True)
+    return refs
+
+
+def _dreamina_refs_need_media_upload(refs: List[Dict[str, Any]]) -> bool:
+    for ref in refs or []:
+        if not _one_str(ref.get("vid")):
+            return True
+    return False
 
 
 def _dreamina_extract_subject_resource_ids_from_prompt(prompt: str) -> Tuple[List[int], str]:
@@ -1020,7 +1255,7 @@ def _dreamina_build_mixed_meta_list(prompt: str, material_kinds: List[str]) -> L
     """为 subject/image 混合 material_list 构造 meta_list。"""
     out: List[Dict[str, Any]] = []
     for i, kind in enumerate(material_kinds or []):
-        meta_type = "subject" if kind == "subject" else "image"
+        meta_type = kind if kind in ("subject", "image", "video", "audio") else "image"
         item: Dict[str, Any] = {
             "type": "",
             "id": str(uuid.uuid4()),
@@ -1074,6 +1309,51 @@ def _dreamina_subject_material(uri: str, ref: Optional[Dict[str, Any]], width: i
                 "deletable": True,
                 "editable": True,
             },
+        },
+    }
+
+
+def _dreamina_material_kind(material: Dict[str, Any]) -> str:
+    if not isinstance(material, dict):
+        return "image"
+    kind = _one_str(material.get("material_type")).lower()
+    return kind if kind in ("subject", "image", "video", "audio") else "image"
+
+
+def _dreamina_video_material(ref: Dict[str, Any]) -> Dict[str, Any]:
+    vid = _one_str((ref or {}).get("vid"))
+    if not vid:
+        raise NonPenalizedTaskError("Dreamina video reference requires uploaded vid", status_code=422, content_violation=True)
+    duration_ms = int(round(float((ref or {}).get("duration_seconds") or 0.0) * 1000))
+    info: Dict[str, Any] = {
+        "source_from": _one_str((ref or {}).get("source_from") or "upload"),
+        "name": _one_str((ref or {}).get("name") or (ref or {}).get("field_name") or "reference video"),
+        "vid": vid,
+        "fps": float((ref or {}).get("fps") or 0),
+        "width": int((ref or {}).get("width") or 0),
+        "height": int((ref or {}).get("height") or 0),
+        "duration": duration_ms,
+    }
+    cover = _one_str((ref or {}).get("cover_image_url"))
+    if cover:
+        info["cover_image_url"] = cover
+    return {"type": "", "id": str(uuid.uuid4()), "material_type": "video", "video_info": info}
+
+
+def _dreamina_audio_material(ref: Dict[str, Any]) -> Dict[str, Any]:
+    vid = _one_str((ref or {}).get("vid"))
+    if not vid:
+        raise NonPenalizedTaskError("Dreamina audio reference requires uploaded vid", status_code=422, content_violation=True)
+    duration_ms = int(round(float((ref or {}).get("duration_seconds") or 0.0) * 1000))
+    return {
+        "type": "",
+        "id": str(uuid.uuid4()),
+        "material_type": "audio",
+        "audio_info": {
+            "source_from": _one_str((ref or {}).get("source_from") or "upload"),
+            "vid": vid,
+            "duration": duration_ms,
+            "name": _one_str((ref or {}).get("name") or (ref or {}).get("field_name") or "reference audio"),
         },
     }
 
@@ -1178,8 +1458,31 @@ def _dreamina_build_imagex_page_headers(
 async def _dreamina_download_image_bytes(url: str, *, log_file: Path) -> bytes:
     """服务端直接下载用户传入的 HTTPS 图片，避免页面 fetch 受 CORS/Slardar/webmssdk 影响。"""
     src = _one_str(url)
+    local_path = _dreamina_local_path_from_source(src)
+    if local_path is not None:
+        try:
+            if not local_path.is_absolute():
+                local_path = (Path.cwd() / local_path).resolve()
+            size = local_path.stat().st_size
+            if size > 30 * 1024 * 1024:
+                raise NonPenalizedTaskError("Dreamina 图片大小超过 30MB", status_code=400)
+            data = await asyncio.to_thread(local_path.read_bytes)
+        except NonPenalizedTaskError:
+            raise
+        except Exception as e:
+            raise NonPenalizedTaskError(
+                f"Dreamina 参考图片无法读取本机文件：path={safe_trim(str(local_path), 180)} err={e}",
+                status_code=400,
+            ) from e
+        if not data:
+            raise NonPenalizedTaskError(
+                f"Dreamina 参考图片本机文件内容为空：path={safe_trim(str(local_path), 180)}",
+                status_code=400,
+            )
+        append_log(log_file, f"[dreamina-api-upload] loaded local image bytes={len(data)} path={safe_trim(str(local_path), 120)}")
+        return data
     if not src.lower().startswith("https://"):
-        raise NonPenalizedTaskError("Dreamina 参考图片仅支持 https 地址", status_code=400)
+        raise NonPenalizedTaskError("Dreamina 参考图片仅支持 https 地址或本机文件路径", status_code=400)
 
     def _download() -> bytes:
         req = UrlRequest(
@@ -1418,6 +1721,71 @@ async def _dreamina_page_xhr_json(
     return tx
 
 
+async def _dreamina_direct_json_request(
+    *,
+    method: str,
+    url: str,
+    headers: Dict[str, str],
+    payload: str = "",
+    log_file: Path,
+    label: str,
+) -> Dict[str, Any]:
+    safe_headers = {
+        str(k): str(v)
+        for k, v in (headers or {}).items()
+        if k and str(k).lower() not in {"host", "cookie", "content-length", "connection", "accept-encoding"}
+    }
+    timeout = httpx.Timeout(120.0, connect=30.0, read=120.0, write=120.0)
+    async with httpx.AsyncClient(timeout=timeout, trust_env=True) as client:
+        resp = await client.request(
+            str(method or "GET").upper(),
+            url,
+            headers=safe_headers,
+            content=payload.encode("utf-8") if payload else None,
+        )
+    text = resp.text or ""
+    append_log(log_file, f"[dreamina-api-upload] direct_json {label} status={resp.status_code} url={safe_trim(url, 160)}")
+    if not (200 <= resp.status_code < 300):
+        raise NonPenalizedTaskError(
+            f"Dreamina {label} failed: status={resp.status_code} body={safe_trim(text, 700)}",
+            status_code=502,
+        )
+    try:
+        obj = resp.json() if text else {}
+    except Exception as e:
+        raise NonPenalizedTaskError(
+            f"Dreamina {label} returned non-json body: {safe_trim(text, 500)}",
+            status_code=502,
+        ) from e
+    if isinstance(obj, dict) and ((obj.get("ResponseMetadata") or {}).get("Error")):
+        raise NonPenalizedTaskError(f"Dreamina {label} error: {safe_trim(_compact_json(obj), 700)}", status_code=502)
+    return obj if isinstance(obj, dict) else {}
+
+
+async def _dreamina_direct_upload_bytes(
+    *,
+    url: str,
+    headers: Dict[str, str],
+    data: bytes,
+    log_file: Path,
+    label: str,
+) -> None:
+    safe_headers = {
+        str(k): str(v)
+        for k, v in (headers or {}).items()
+        if k and str(k).lower() not in {"host", "cookie", "content-length", "connection", "accept-encoding"}
+    }
+    timeout = httpx.Timeout(300.0, connect=30.0, read=300.0, write=300.0)
+    async with httpx.AsyncClient(timeout=timeout, trust_env=True) as client:
+        resp = await client.post(url, headers=safe_headers, content=data)
+    append_log(log_file, f"[dreamina-api-upload] direct_upload {label} status={resp.status_code} bytes={len(data)} url={safe_trim(url, 160)}")
+    if not (200 <= resp.status_code < 300):
+        raise NonPenalizedTaskError(
+            f"Dreamina {label} upload failed: status={resp.status_code} body={safe_trim(resp.text or '', 700)}",
+            status_code=502,
+        )
+
+
 async def _dreamina_upload_one_image_via_page_fetch(
     page: Any,
     ref: Dict[str, Any],
@@ -1459,8 +1827,13 @@ async def _dreamina_upload_one_image_via_page_fetch(
         },
     )
     append_log(log_file, f"[dreamina-api-upload] apply image {index}: size={len(image_bytes)} crc32={crc32} service_id={service_id}")
-    apply_tx = await _dreamina_page_xhr_json(page, url=apply_url, method="GET", headers=apply_headers, json_data=None, log_file=log_file)
-    apply_obj = apply_tx.get("_json") or {}
+    apply_obj = await _dreamina_direct_json_request(
+        method="GET",
+        url=apply_url,
+        headers=apply_headers,
+        log_file=log_file,
+        label=f"ImageX apply image {index}",
+    )
     if isinstance(apply_obj, dict) and ((apply_obj.get("ResponseMetadata") or {}).get("Error")):
         raise NonPenalizedTaskError(f"Dreamina ApplyImageUpload failed: {safe_trim(_compact_json(apply_obj), 700)}", status_code=502)
     upload_address = ((apply_obj.get("Result") or {}) if isinstance(apply_obj, dict) else {}).get("UploadAddress") or {}
@@ -1471,8 +1844,7 @@ async def _dreamina_upload_one_image_via_page_fetch(
     store_info = store_infos[0]
     upload_url = f"https://{upload_hosts[0]}/upload/v1/{store_info.get('StoreUri')}"
 
-    await _dreamina_page_fetch_upload_bytes(
-        page,
+    await _dreamina_direct_upload_bytes(
         url=upload_url,
         headers={
             "Accept": "*/*",
@@ -1483,6 +1855,7 @@ async def _dreamina_upload_one_image_via_page_fetch(
         },
         data=image_bytes,
         log_file=log_file,
+        label=f"ImageX image {index}",
     )
 
     # 4) Action=CommitImageUpload
@@ -1502,15 +1875,14 @@ async def _dreamina_upload_one_image_via_page_fetch(
             "x-amz-content-sha256": payload_hash,
         },
     )
-    commit_tx = await _dreamina_page_xhr_json(
-        page,
-        url=commit_url,
+    commit_obj = await _dreamina_direct_json_request(
         method="POST",
+        url=commit_url,
         headers=commit_headers,
-        json_data={"SessionKey": upload_address.get("SessionKey"), "SuccessActionStatus": "200"},
+        payload=commit_payload,
         log_file=log_file,
+        label=f"ImageX commit image {index}",
     )
-    commit_obj = commit_tx.get("_json") or {}
     if isinstance(commit_obj, dict) and ((commit_obj.get("ResponseMetadata") or {}).get("Error")):
         raise NonPenalizedTaskError(f"Dreamina CommitImageUpload failed: {safe_trim(_compact_json(commit_obj), 700)}", status_code=502)
     result = (commit_obj.get("Result") or {}) if isinstance(commit_obj, dict) else {}
@@ -1568,6 +1940,420 @@ async def _dreamina_upload_image_refs_via_page_fetch(
     return uris
 
 
+def _dreamina_token_data_from_response(token_obj: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(token_obj, dict):
+        return {}
+    data = token_obj.get("data")
+    if isinstance(data, dict):
+        return data
+    return token_obj
+
+
+def _dreamina_vod_base_from_token(token_data: Dict[str, Any]) -> str:
+    raw = _one_str(
+        (token_data or {}).get("upload_domain")
+        or (token_data or {}).get("uploadDomain")
+        or (token_data or {}).get("video_host")
+        or (token_data or {}).get("videoHost")
+        or "vod16-normal-us-ttp.capcutapi.us"
+    )
+    if raw.startswith(("http://", "https://")):
+        return raw.rstrip("/")
+    return f"https://{raw}".rstrip("/")
+
+
+def _dreamina_vod_space_name(token_data: Dict[str, Any]) -> str:
+    return _one_str(
+        (token_data or {}).get("space_name")
+        or (token_data or {}).get("spaceName")
+        or (token_data or {}).get("SpaceName")
+        or "aigc-va"
+    )
+
+
+def _dreamina_vod_user_id(token_data: Dict[str, Any]) -> str:
+    for key in ("user_id", "userId", "uid", "UID", "UserID", "UserId"):
+        v = _one_str((token_data or {}).get(key))
+        if v:
+            return v
+    return ""
+
+
+def _dreamina_vod_file_name(ref: Dict[str, Any], *, media_kind: str, index: int) -> str:
+    src = _one_str((ref or {}).get("source") or (ref or {}).get("url"))
+    raw = _one_str((ref or {}).get("name") or (ref or {}).get("filename") or (ref or {}).get("file_name"))
+    if not raw and src:
+        try:
+            raw = unquote(Path(urlparse(src).path).name)
+        except Exception:
+            raw = ""
+    ext = ".mp3" if media_kind == "audio" else ".mp4"
+    if raw and "." in raw:
+        suffix = Path(raw).suffix
+        if suffix:
+            ext = suffix[:12]
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", raw or f"dreamina_{media_kind}_{index}{ext}").strip("._")
+    if not name:
+        name = f"dreamina_{media_kind}_{index}{ext}"
+    if "." not in name:
+        name = f"{name}{ext}"
+    return name[:160]
+
+
+def _dreamina_media_source(ref: Dict[str, Any], *, media_kind: str, index: int) -> str:
+    src = _one_str(
+        (ref or {}).get("source")
+        or (ref or {}).get("url")
+        or (ref or {}).get(f"{media_kind}_url")
+        or (ref or {}).get(f"{media_kind}Url")
+    )
+    if not src:
+        raise NonPenalizedTaskError(
+            f"Dreamina {media_kind} {index} requires uploaded vid or source URL/path",
+            status_code=422,
+            content_violation=True,
+        )
+    return src
+
+
+def _dreamina_local_path_from_source(src: str) -> Optional[Path]:
+    raw = _one_str(src)
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() == "file":
+        path = unquote(parsed.path or "")
+        if re.match(r"^/[A-Za-z]:/", path):
+            path = path[1:]
+        return Path(path)
+    if re.match(r"^[A-Za-z]:[\\/]", raw) or raw.startswith("\\\\"):
+        return Path(raw)
+    if not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", raw):
+        return Path(raw)
+    return None
+
+
+async def _dreamina_download_media_bytes(src: str, *, media_kind: str, log_file: Path) -> bytes:
+    source = _one_str(src)
+    if not source:
+        raise NonPenalizedTaskError(f"Dreamina {media_kind} source is empty", status_code=400)
+    max_bytes = _dreamina_env_int(
+        "DREAMINA_VOD_UPLOAD_MAX_BYTES",
+        30 * 1024 * 1024,
+        minimum=128,
+        maximum=500 * 1024 * 1024,
+    )
+    local_path = _dreamina_local_path_from_source(source)
+    if local_path is not None:
+        try:
+            if not local_path.is_absolute():
+                local_path = (Path.cwd() / local_path).resolve()
+            size = local_path.stat().st_size
+            if size > max_bytes:
+                raise NonPenalizedTaskError(
+                    f"Dreamina {media_kind} file is too large for direct VOD upload: {size} bytes > {max_bytes} bytes",
+                    status_code=400,
+                    content_violation=True,
+                )
+            data = await asyncio.to_thread(local_path.read_bytes)
+        except NonPenalizedTaskError:
+            raise
+        except Exception as e:
+            raise NonPenalizedTaskError(
+                f"Dreamina {media_kind} local file cannot be read: path={safe_trim(str(local_path), 180)} err={e}",
+                status_code=400,
+            ) from e
+    else:
+        if not source.lower().startswith("https://"):
+            raise NonPenalizedTaskError(
+                f"Dreamina {media_kind} URL upload only supports https URLs or local file paths",
+                status_code=400,
+                content_violation=True,
+            )
+
+        def _download() -> bytes:
+            req = UrlRequest(
+                _dreamina_normalize_download_url(source),
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": f"{media_kind}/*,*/*;q=0.8",
+                },
+            )
+            with urlopen(req, timeout=90) as resp:
+                return resp.read(max_bytes + 1)
+
+        try:
+            data = await asyncio.to_thread(_download)
+        except NonPenalizedTaskError:
+            raise
+        except Exception as e:
+            raise NonPenalizedTaskError(
+                f"Dreamina {media_kind} URL cannot be downloaded: url={safe_trim(source, 180)} err={e}",
+                status_code=400,
+            ) from e
+        if len(data) > max_bytes:
+            raise NonPenalizedTaskError(
+                f"Dreamina {media_kind} file is too large for direct VOD upload: > {max_bytes} bytes",
+                status_code=400,
+                content_violation=True,
+            )
+
+    if not data:
+        raise NonPenalizedTaskError(f"Dreamina {media_kind} source is empty", status_code=400)
+    append_log(log_file, f"[dreamina-vod-upload] loaded {media_kind} bytes={len(data)} source={safe_trim(source, 140)}")
+    return data
+
+
+def _dreamina_vod_signed_headers(
+    method: str,
+    url: str,
+    token_data: Dict[str, Any],
+    *,
+    payload: str = "",
+    content_type: str = "",
+) -> Dict[str, str]:
+    access_key_id = _one_str((token_data or {}).get("access_key_id") or (token_data or {}).get("AccessKeyID") or (token_data or {}).get("AccessKeyId"))
+    secret_access_key = _one_str((token_data or {}).get("secret_access_key") or (token_data or {}).get("SecretAccessKey"))
+    session_token = _one_str((token_data or {}).get("session_token") or (token_data or {}).get("SessionToken"))
+    if not access_key_id or not secret_access_key or not session_token:
+        raise NonPenalizedTaskError("Dreamina VOD upload token is missing credentials", status_code=502)
+    ts = _dreamina_amz_timestamp()
+    base_headers: Dict[str, str] = {"x-amz-date": ts, "x-amz-security-token": session_token}
+    if method.upper() == "POST" and payload:
+        base_headers["x-amz-content-sha256"] = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    aws_region = _one_str((token_data or {}).get("region") or (token_data or {}).get("Region")) or _DREAMINA_AWS_REGION
+    headers: Dict[str, str] = {
+        "authorization": _dreamina_create_imagex_signature(
+            method,
+            url,
+            base_headers,
+            access_key_id,
+            secret_access_key,
+            session_token,
+            payload,
+            aws_region=aws_region,
+            service_name="vod",
+        ),
+        "x-amz-date": ts,
+        "x-amz-security-token": session_token,
+    }
+    if method.upper() == "POST" and payload:
+        headers["x-amz-content-sha256"] = base_headers["x-amz-content-sha256"]
+    if content_type:
+        headers["Content-Type"] = content_type
+    return headers
+
+
+async def _dreamina_vod_json_request(
+    *,
+    method: str,
+    url: str,
+    headers: Dict[str, str],
+    payload: str = "",
+    log_file: Path,
+    label: str,
+) -> Dict[str, Any]:
+    timeout = httpx.Timeout(120.0, connect=30.0, read=120.0, write=120.0)
+    async with httpx.AsyncClient(timeout=timeout, trust_env=True) as client:
+        resp = await client.request(
+            method.upper(),
+            url,
+            headers=headers,
+            content=payload.encode("utf-8") if payload else None,
+        )
+    text = resp.text or ""
+    append_log(log_file, f"[dreamina-vod-upload] {label} status={resp.status_code} url={safe_trim(url, 180)}")
+    if not (200 <= resp.status_code < 300):
+        raise NonPenalizedTaskError(
+            f"Dreamina VOD {label} failed: status={resp.status_code} body={safe_trim(text, 700)}",
+            status_code=502,
+        )
+    try:
+        obj = resp.json() if text else {}
+    except Exception as e:
+        raise NonPenalizedTaskError(
+            f"Dreamina VOD {label} returned non-json body: {safe_trim(text, 500)}",
+            status_code=502,
+        ) from e
+    if isinstance(obj, dict) and ((obj.get("ResponseMetadata") or {}).get("Error")):
+        raise NonPenalizedTaskError(f"Dreamina VOD {label} error: {safe_trim(_compact_json(obj), 700)}", status_code=502)
+    return obj if isinstance(obj, dict) else {}
+
+
+async def _dreamina_vod_direct_upload(
+    *,
+    upload_host: str,
+    store_uri: str,
+    auth: str,
+    data: bytes,
+    filename: str,
+    user_id: str,
+    log_file: Path,
+) -> None:
+    host = _one_str(upload_host)
+    if not host:
+        raise NonPenalizedTaskError("Dreamina VOD upload host is empty", status_code=502)
+    base = host.rstrip("/")
+    if not base.startswith(("http://", "https://")):
+        base = f"https://{base}"
+    upload_url = f"{base}/upload/v1/{store_uri}"
+    headers: Dict[str, str] = {
+        "Accept": "*/*",
+        "Authorization": auth,
+        "Content-CRC32": _dreamina_crc32_hex(data),
+        "Content-Type": "application/octet-stream",
+        "Content-Disposition": f'attachment; filename="{quote(filename, safe="._-")}"',
+    }
+    if user_id:
+        headers["X-Storage-U"] = quote(user_id, safe="")
+    timeout = httpx.Timeout(300.0, connect=30.0, read=300.0, write=300.0)
+    async with httpx.AsyncClient(timeout=timeout, trust_env=True) as client:
+        resp = await client.post(upload_url, headers=headers, content=data)
+    append_log(log_file, f"[dreamina-vod-upload] binary status={resp.status_code} bytes={len(data)} url={safe_trim(upload_url, 180)}")
+    if not (200 <= resp.status_code < 300):
+        raise NonPenalizedTaskError(
+            f"Dreamina VOD binary upload failed: status={resp.status_code} body={safe_trim(resp.text or '', 700)}",
+            status_code=502,
+        )
+
+
+async def _dreamina_upload_one_media_via_vod(
+    ref: Dict[str, Any],
+    *,
+    token_data: Dict[str, Any],
+    media_kind: str,
+    log_file: Path,
+    index: int,
+) -> Dict[str, Any]:
+    src = _dreamina_media_source(ref, media_kind=media_kind, index=index)
+    data = await _dreamina_download_media_bytes(src, media_kind=media_kind, log_file=log_file)
+    vod_base = _dreamina_vod_base_from_token(token_data)
+    space_name = _dreamina_vod_space_name(token_data)
+    # ByteDance VOD uploader only exposes video/image/object file types. Audio
+    # uploads still use VOD FileType=video; Dreamina distinguishes audio later
+    # in the generated material payload via material_type=audio.
+    file_type = "video"
+    apply_url = (
+        f"{vod_base}/?Action=ApplyUploadInner&Version=2020-11-19"
+        f"&SpaceName={quote(space_name, safe='')}&FileType={quote(file_type, safe='')}"
+        f"&IsInner=1&FileSize={len(data)}&device_platform=web"
+    )
+    apply_headers = _dreamina_vod_signed_headers("GET", apply_url, token_data)
+    append_log(log_file, f"[dreamina-vod-upload] apply {media_kind} {index}: size={len(data)} space={space_name}")
+    apply_obj = await _dreamina_vod_json_request(
+        method="GET",
+        url=apply_url,
+        headers=apply_headers,
+        log_file=log_file,
+        label=f"apply {media_kind}",
+    )
+    result = (apply_obj.get("Result") or {}) if isinstance(apply_obj, dict) else {}
+    upload_address = result.get("InnerUploadAddress") or result.get("UploadAddress") or {}
+    upload_nodes = upload_address.get("UploadNodes") or result.get("UploadNodes") or []
+    upload_node = upload_nodes[0] if upload_nodes and isinstance(upload_nodes[0], dict) else {}
+    store_infos = upload_address.get("StoreInfos") or upload_node.get("StoreInfos") or result.get("StoreInfos") or []
+    store_info = store_infos[0] if store_infos and isinstance(store_infos[0], dict) else {}
+    upload_host = _one_str(
+        upload_address.get("UploadHost")
+        or upload_node.get("UploadHost")
+        or store_info.get("UploadHost")
+        or result.get("UploadHost")
+        or ((upload_address.get("UploadHosts") or [None])[0])
+        or ((upload_node.get("UploadHosts") or [None])[0])
+        or ((store_info.get("UploadHosts") or [None])[0] if isinstance(store_info.get("UploadHosts"), list) else None)
+        or ((result.get("UploadHosts") or [None])[0])
+    )
+    store_uri = _one_str(store_info.get("StoreUri") or store_info.get("StoreURI") or upload_address.get("StoreUri") or upload_node.get("StoreUri") or result.get("StoreUri"))
+    auth = _one_str(store_info.get("Auth") or upload_address.get("Auth") or upload_node.get("Auth") or result.get("Auth"))
+    session_key = _one_str(upload_address.get("SessionKey") or upload_node.get("SessionKey") or store_info.get("SessionKey") or result.get("SessionKey"))
+    vid = _one_str(
+        upload_node.get("Vid")
+        or result.get("Vid")
+        or upload_address.get("Vid")
+    )
+    if not (upload_host and store_uri and auth and session_key and vid):
+        raise NonPenalizedTaskError(f"Dreamina VOD apply missing upload fields: {safe_trim(_compact_json(apply_obj), 900)}", status_code=502)
+
+    await _dreamina_vod_direct_upload(
+        upload_host=upload_host,
+        store_uri=store_uri,
+        auth=auth,
+        data=data,
+        filename=_dreamina_vod_file_name(ref, media_kind=media_kind, index=index),
+        user_id=_dreamina_vod_user_id(token_data),
+        log_file=log_file,
+    )
+
+    commit_payload = json.dumps({"SessionKey": session_key, "Functions": []}, separators=(",", ":"))
+    commit_url = (
+        f"{vod_base}/?Action=CommitUploadInner&Version=2020-11-19"
+        f"&SpaceName={quote(space_name, safe='')}&device_platform=web"
+    )
+    commit_headers = _dreamina_vod_signed_headers(
+        "POST",
+        commit_url,
+        token_data,
+        payload=commit_payload,
+        content_type="application/json",
+    )
+    commit_obj = await _dreamina_vod_json_request(
+        method="POST",
+        url=commit_url,
+        headers=commit_headers,
+        payload=commit_payload,
+        log_file=log_file,
+        label=f"commit {media_kind}",
+    )
+    append_log(log_file, f"[dreamina-vod-upload] committed {media_kind} {index}: vid={safe_trim(vid, 80)}")
+    return {"vid": vid, "store_uri": store_uri, "commit_response": commit_obj}
+
+
+async def _dreamina_upload_media_refs_via_vod(
+    page: Any,
+    refs: List[Dict[str, Any]],
+    *,
+    media_kind: str,
+    log_file: Path,
+    api_base: str = _DREAMINA_API_BASE,
+    header_loc: str = "US",
+) -> None:
+    pending = [ref for ref in (refs or []) if not _one_str((ref or {}).get("vid"))]
+    if not pending:
+        return
+    for i, ref in enumerate(refs or [], start=1):
+        if _one_str((ref or {}).get("vid")):
+            continue
+        token_tx = await page_fetch_json(
+            page,
+            url=f"{api_base}{_DREAMINA_GET_UPLOAD_TOKEN_PATH}",
+            method="POST",
+            headers=build_jimeng_page_fetch_headers(
+                uri=_DREAMINA_GET_UPLOAD_TOKEN_PATH,
+                appid=_DREAMINA_AID,
+                appvr=_APPVR,
+                pf="7",
+                lan="en",
+                loc=header_loc,
+            ),
+            json_data={"scene": 1},
+            log_file=log_file,
+        )
+        token_obj = token_tx.get("_json") or {}
+        if _one_str(token_obj.get("ret")) not in ("", "0"):
+            raise NonPenalizedTaskError(f"Dreamina get_upload_token failed for {media_kind} {i}: {safe_trim(_compact_json(token_obj), 700)}", status_code=502)
+        token_data = _dreamina_token_data_from_response(token_obj)
+        append_log(log_file, f"[dreamina-vod-upload] get_upload_token ok {media_kind}={i}/{len(refs or [])} space={_dreamina_vod_space_name(token_data)}")
+        upload_info = await _dreamina_upload_one_media_via_vod(
+            ref,
+            token_data=token_data,
+            media_kind=media_kind,
+            log_file=log_file,
+            index=i,
+        )
+        ref["vid"] = _one_str(upload_info.get("vid"))
+        ref["source_from"] = _one_str(ref.get("source_from") or "upload")
+
+
 def _dreamina_seedance_generate_body(
     *,
     prompt: str,
@@ -1584,19 +2370,18 @@ def _dreamina_seedance_generate_body(
     component_id = str(uuid.uuid4())
     submit_id = str(uuid.uuid4())
     is_fast = _dreamina_is_seedance20_fast(model)
+    is_mini = _dreamina_is_seedance20_mini(model)
     is_omni_reference = mode != "first_last_frames"
     is_text_to_video = not material_list
     is_standard_output = is_omni_reference or mode == "first_last_frames"
-    material_kinds = ["subject" if _one_str((m or {}).get("material_type")) == "subject" else "image" for m in (material_list or [])]
+    material_kinds = [_dreamina_material_kind(m or {}) for m in (material_list or [])]
     subject_count = sum(1 for x in material_kinds if x == "subject")
-    external_image_count = sum(1 for x in material_kinds if x != "subject")
+    material_type_codes = [_DREAMINA_MATERIAL_TYPE_CODES[x] for x in material_kinds if x in _DREAMINA_MATERIAL_TYPE_CODES]
     use_subject_material = subject_count > 0
     # 标准 Seedance 2.0（文生视频/omni 参考图/首尾帧）与“封装的 fast”扣费字段不同：
     # benefit_type 需要带输出规格，并带 amount/workspace_id；否则会命中旧的 dreamina_seedance_20_fast 路径。
-    benefit = (
-        _SEEDANCE_BENEFIT_FAST_T2V_OUTPUT
-        if is_fast 
-        else _SEEDANCE_BENEFIT_PRO_OUTPUT
+    benefit = _SEEDANCE_BENEFIT_MINI_OUTPUT if is_mini else (
+        _SEEDANCE_BENEFIT_FAST_T2V_OUTPUT if is_fast else _SEEDANCE_BENEFIT_PRO_OUTPUT
     )
     function_mode = "first_last_frames" if mode == "first_last_frames" else "omni_reference"
     extra_vip_function_key = f"{model}-{resolution}" if is_standard_output else model
@@ -1612,7 +2397,7 @@ def _dreamina_seedance_generate_body(
             "useVipFunctionDetailsReporterHoc": True,
         },
         # materialTypes 只对应外部图片上传素材数量；内部 subject uri 不计入。
-        "materialTypes": [1] * external_image_count,
+        "materialTypes": material_type_codes,
     }
     if is_standard_output:
         scene_option["resolution"] = resolution
@@ -1645,6 +2430,7 @@ def _dreamina_seedance_generate_body(
             "id": str(uuid.uuid4()),
             "material_list": material_list,
             "meta_list": meta_list,
+            "video_config": {"max_image_count": 9, "max_video_count": 3, "max_audio_count": 3},
         }
     else:
         if is_standard_output:
@@ -2185,7 +2971,7 @@ class DreaminaSession:
     def is_CA(self) -> bool:
         """当前 Dreamina store-country-code 是否为加拿大。"""
         return _one_str(self.store_country_code).lower() == "ca"
-    
+
     def is_TR(self) -> bool:
         """当前 Dreamina store-country-code 是否为加拿大。"""
         return _one_str(self.store_country_code).lower() == "tr"
@@ -2278,6 +3064,413 @@ def get_or_create_dreamina_session(
     else:
         sess.pw_ctx.access_key = access_key
     return sess
+
+
+def _dreamina_login_scopes(page: Any) -> List[Any]:
+    scopes = [page]
+    try:
+        main_frame = getattr(page, "main_frame", None)
+        for frame in list(getattr(page, "frames", []) or []):
+            if frame is not None and frame is not main_frame:
+                scopes.append(frame)
+    except Exception:
+        pass
+    return scopes
+
+
+async def _dreamina_first_visible_locator(page: Any, selectors: Tuple[str, ...], *, timeout_ms: int = 700) -> Tuple[Optional[Any], str]:
+    for scope in _dreamina_login_scopes(page):
+        for selector in selectors:
+            try:
+                loc = scope.locator(selector).first
+                if await loc.is_visible(timeout=timeout_ms):
+                    return loc, selector
+            except Exception:
+                continue
+    return None, ""
+
+
+async def _dreamina_click_text_control(
+    page: Any,
+    texts: Tuple[str, ...],
+    *,
+    forbidden_texts: Tuple[str, ...] = ("google", "谷歌"),
+    timeout_ms: int = 1200,
+) -> str:
+    control_selector = 'button, a, [role="button"], [role="link"], [role="menuitem"], [tabindex]'
+    fallback_selector = (
+        'button, a, [role="button"], [role="link"], [role="menuitem"], [tabindex], div, span'
+    )
+    forbidden_lower = tuple(str(x or "").strip().lower() for x in forbidden_texts if str(x or "").strip())
+    for scope in _dreamina_login_scopes(page):
+        for text in texts:
+            text_s = str(text or "").strip()
+            if not text_s:
+                continue
+            try:
+                loc = scope.locator(control_selector).filter(has_text=re.compile(re.escape(text_s), re.I)).first
+                if not await loc.is_visible(timeout=timeout_ms):
+                    continue
+                try:
+                    label = str(await loc.inner_text(timeout=500) or "").strip().lower()
+                except Exception:
+                    label = ""
+                if label and any(bad in label for bad in forbidden_lower):
+                    continue
+                await loc.click(timeout=timeout_ms)
+                return text_s
+            except Exception:
+                continue
+            try:
+                clicked = await scope.evaluate(
+                    """
+                    (args) => {
+                        const wanted = String(args.text || '').trim().toLowerCase();
+                        const selector = String(args.selector || '');
+                        const forbidden = Array.isArray(args.forbidden) ? args.forbidden : [];
+                        const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+                        const isVisible = (el) => {
+                            const rect = el.getBoundingClientRect();
+                            if (!rect || rect.width < 2 || rect.height < 2) return false;
+                            const style = window.getComputedStyle(el);
+                            if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+                            if (Number(style.opacity || '1') === 0 || style.pointerEvents === 'none') return false;
+                            return true;
+                        };
+                        const candidates = [];
+                        for (const el of Array.from(document.querySelectorAll(selector))) {
+                            const rawLabel = normalize(
+                                el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || ''
+                            );
+                            if (!rawLabel || rawLabel.length > Math.max(160, args.text.length + 80)) continue;
+                            const lower = rawLabel.toLowerCase();
+                            if (forbidden.some((bad) => bad && lower.includes(String(bad).toLowerCase()))) continue;
+                            const exact = lower === wanted;
+                            const contains = !exact && lower.includes(wanted);
+                            if (!exact && !contains) continue;
+                            if (!isVisible(el)) continue;
+                            if (el.disabled || String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true') continue;
+
+                            const style = window.getComputedStyle(el);
+                            const tag = String(el.tagName || '').toLowerCase();
+                            const role = String(el.getAttribute('role') || '').toLowerCase();
+                            const tabindex = el.getAttribute('tabindex');
+                            const rect = el.getBoundingClientRect();
+                            const area = rect.width * rect.height;
+                            let score = 0;
+                            if (exact) score += 100;
+                            if (tag === 'button' || tag === 'a') score += 35;
+                            if (role === 'button' || role === 'link' || role === 'menuitem') score += 35;
+                            if (style.cursor === 'pointer') score += 25;
+                            if (tabindex !== null) score += 12;
+                            if (typeof el.onclick === 'function') score += 10;
+                            if (rawLabel.length <= args.text.length + 8) score += 8;
+                            score -= Math.min(30, el.children.length * 4);
+                            score -= Math.min(40, area / 20000);
+                            candidates.push({ el, score, area, labelLength: rawLabel.length });
+                        }
+                        candidates.sort((a, b) => (
+                            b.score - a.score || a.area - b.area || a.labelLength - b.labelLength
+                        ));
+                        const best = candidates[0] && candidates[0].el;
+                        if (!best) return false;
+                        best.scrollIntoView({ block: 'center', inline: 'center' });
+                        best.click();
+                        return true;
+                    }
+                    """,
+                    {"text": text_s, "selector": fallback_selector, "forbidden": list(forbidden_lower)},
+                )
+                if clicked:
+                    return text_s
+            except Exception:
+                continue
+    return ""
+
+
+async def _dreamina_fill_totp_if_visible(page: Any, platform_efa: str, *, timeout_ms: int) -> str:
+    otp_selectors = (
+        'input[autocomplete="one-time-code"]',
+        'input[name*="otp" i]',
+        'input[name*="code" i]',
+        'input[id*="otp" i]',
+        'input[id*="code" i]',
+        'input[placeholder*="code" i]',
+        'input[placeholder*="verification" i]',
+        'input[placeholder*="验证码"]',
+        'input[type="tel"]',
+    )
+    loc, selector = await _dreamina_first_visible_locator(page, otp_selectors, timeout_ms=600)
+    if loc is None:
+        return ""
+    if not _one_str(platform_efa):
+        raise RuntimeError("Dreamina 登录检测到验证码输入框，但账号未配置 EFA/TOTP Secret，请先补齐或人工接管")
+    from .sora_plus_register_executor import _generate_totp_code
+
+    code = _generate_totp_code(platform_efa)
+    try:
+        await loc.fill(code, timeout=timeout_ms)
+        return selector
+    except Exception:
+        return ""
+
+
+async def _dreamina_direct_email_login_steps(
+    page: Any,
+    *,
+    platform_username: str,
+    platform_password: str,
+    platform_efa: str,
+    timeout_ms: int,
+    progress_cb: ProgressCB,
+) -> Dict[str, Any]:
+    email_selectors = (
+        'input[type="email"]',
+        'input[name*="email" i]',
+        'input[autocomplete="email"]',
+        'input[placeholder*="email" i]',
+        'input[placeholder*="e-mail" i]',
+        'input[placeholder*="mail" i]',
+        'input[placeholder*="邮箱"]',
+        'input[placeholder*="邮件"]',
+        'input[placeholder*="账号"]',
+        'input[placeholder*="account" i]',
+        'input[autocomplete="username"]',
+        'input[name*="user" i]',
+        'input[placeholder*="username" i]',
+    )
+    password_selectors = (
+        'input[type="password"]',
+        'input[name*="password" i]',
+        'input[autocomplete="current-password"]',
+        'input[placeholder*="password" i]',
+        'input[placeholder*="密码"]',
+    )
+    login_entry_texts = (
+        "Try now",
+        "Try it now",
+        "Start creating with AI",
+        "Start Creating With AI",
+        "Continue with email",
+        "Use email",
+        "Email",
+        "Log in",
+        "Login",
+        "Sign in",
+        "Sign up / Log in",
+        "Continue",
+        "使用邮箱",
+        "邮箱",
+        "登录",
+        "登入",
+        "继续",
+    )
+    submit_texts = (
+        "Log in",
+        "Login",
+        "Sign in",
+        "Continue",
+        "Next",
+        "Submit",
+        "Verify",
+        "Confirm",
+        "Done",
+        "登录",
+        "登入",
+        "继续",
+        "下一步",
+        "提交",
+        "验证",
+        "确认",
+        "完成",
+    )
+
+    per_step = int(max(600, min(5000, timeout_ms // 12)))
+    deadline = time.time() + max(30.0, timeout_ms / 1000.0)
+    clicked_entry = False
+    while time.time() < deadline:
+        ctx = getattr(page, "context", None)
+        session_info = await _dreamina_read_sessionid_from_context(ctx)
+        if session_info:
+            return session_info
+
+        progressed = False
+        otp_selector = await _dreamina_fill_totp_if_visible(page, platform_efa, timeout_ms=per_step)
+        if otp_selector:
+            await progress_cb(58, {"stage": "dreamina_totp_filled", "selector": otp_selector})
+            await _dreamina_click_text_control(page, submit_texts, timeout_ms=per_step)
+            progressed = True
+            await asyncio.sleep(1.5)
+
+        if progressed:
+            continue
+
+        password_loc, password_selector = await _dreamina_first_visible_locator(page, password_selectors, timeout_ms=per_step)
+        email_loc, email_selector = await _dreamina_first_visible_locator(page, email_selectors, timeout_ms=per_step)
+        if email_loc is not None and password_loc is not None:
+            try:
+                await email_loc.fill(platform_username, timeout=per_step)
+                await progress_cb(30, {"stage": "dreamina_email_filled", "selector": email_selector})
+            except Exception:
+                pass
+        if password_loc is not None:
+            await password_loc.fill(platform_password, timeout=per_step)
+            await progress_cb(44, {"stage": "dreamina_password_filled", "selector": password_selector})
+            await _dreamina_click_text_control(page, submit_texts, timeout_ms=per_step)
+            progressed = True
+            await asyncio.sleep(1.5)
+        elif email_loc is not None:
+            await email_loc.fill(platform_username, timeout=per_step)
+            await progress_cb(28, {"stage": "dreamina_email_filled", "selector": email_selector})
+            await _dreamina_click_text_control(page, submit_texts, timeout_ms=per_step)
+            progressed = True
+            await asyncio.sleep(1.2)
+
+        if progressed:
+            continue
+
+        if not clicked_entry:
+            clicked = await _dreamina_click_text_control(page, login_entry_texts, timeout_ms=per_step)
+            if clicked:
+                clicked_entry = True
+                await progress_cb(18, {"stage": "dreamina_login_entry_clicked", "text": clicked})
+                await asyncio.sleep(1.2)
+                continue
+
+        await asyncio.sleep(0.6)
+
+    return await _dreamina_read_sessionid_from_context(getattr(page, "context", None))
+
+
+async def dreamina_admin_direct_login_page(
+    progress_cb: Optional[ProgressCB] = None,
+    *,
+    db: Any = None,
+    window_pk: int = 0,
+    browser_vendor: str,
+    browser_base_url: str,
+    browser_access_key: Optional[str],
+    space_id: str,
+    window_key: str,
+    headless: bool = False,
+    default_target_url: Optional[str] = None,
+    login_url: Optional[str] = None,
+    pure_mode: bool = True,
+    timeout_seconds: float = 120.0,
+) -> Dict[str, Any]:
+    """Open Dreamina directly and log in with the bound platform credentials."""
+    if progress_cb is None:
+        async def _noop_progress(_pct: int, _meta: Optional[Dict[str, Any]] = None) -> None:
+            return
+
+        progress_cb = _noop_progress
+
+    if db is None or int(window_pk or 0) <= 0:
+        raise RuntimeError("Dreamina 直接上号缺少 db/window_pk，无法读取窗口绑定账号")
+
+    from .sora_plus_register_executor import resolve_window_platform_login_creds_optional_efa
+
+    creds = await resolve_window_platform_login_creds_optional_efa(db, window_pk=int(window_pk))
+    platform_url = _one_str(creds.get("platform_url"))
+    platform_username = _one_str(creds.get("platform_username"))
+    platform_password = _one_str(creds.get("platform_password"))
+    platform_efa = _one_str(creds.get("platform_efa"))
+
+    target = _one_str(default_target_url) or DEFAULT_DREAMINA_TARGET
+    entry = _one_str(login_url)
+    if not entry:
+        try:
+            host = str(urlparse(platform_url).netloc or "").strip().lower()
+        except Exception:
+            host = ""
+        entry = platform_url if ("dreamina.capcut.com" in host or host.endswith("capcut.com")) else "https://dreamina.capcut.com/"
+    if not entry:
+        entry = "https://dreamina.capcut.com/"
+
+    try:
+        timeout_ms = int(float(timeout_seconds or 120.0) * 1000)
+    except Exception:
+        timeout_ms = 120_000
+    timeout_ms = max(45_000, min(timeout_ms, 240_000))
+
+    sess = get_or_create_dreamina_session(
+        vendor=browser_vendor,
+        base_url=browser_base_url,
+        access_key=browser_access_key,
+        space_id=space_id,
+        window_key=window_key,
+    )
+    sess.browser_headless = headless
+    sess.browser_pure_mode = pure_mode
+    sess.idle_close_disabled = True
+    try:
+        sess._cancel_idle_close()
+    except Exception:
+        pass
+
+    await progress_cb(3, {"stage": "dreamina_direct_login_start", "url": entry})
+    async with sess._bring_drafts_lock:
+        await sess.ensure_open(
+            args=sess.browser_open_args,
+            force_open=sess.browser_force_open,
+            headless=headless,
+            acquire_bring_lock=False,
+            pure_mode=pure_mode,
+        )
+        ctx = getattr(sess.pw_ctx, "context", None)
+        if ctx is None:
+            raise RuntimeError("浏览器上下文不可用：context is None")
+
+        page = getattr(sess.pw_ctx, "page", None)
+        if page is None or sess._is_page_closed(page):
+            pages = []
+            try:
+                pages = list(getattr(ctx, "pages", []) or [])
+            except Exception:
+                pages = []
+            page = next((p for p in pages if not sess._is_page_closed(p)), None)
+            if page is None:
+                page = await ctx.new_page()
+            sess.pw_ctx.page = page
+
+        await page.goto(entry, wait_until="domcontentloaded", timeout=timeout_ms)
+        await progress_cb(10, {"stage": "dreamina_site_loaded", "url": entry})
+        await asyncio.sleep(1.0)
+
+        session_info = await _dreamina_read_sessionid_from_context(ctx)
+        if session_info:
+            await progress_cb(70, {"stage": "dreamina_already_logged_in"})
+        else:
+            session_info = await _dreamina_direct_email_login_steps(
+                page,
+                platform_username=platform_username,
+                platform_password=platform_password,
+                platform_efa=platform_efa,
+                timeout_ms=timeout_ms,
+                progress_cb=progress_cb,
+            )
+
+        if not session_info:
+            raise RuntimeError("Dreamina 直接上号未读取到 sessionid；窗口已打开，请检查是否需要验证码、风控或页面结构变化")
+
+        await page.goto(target, wait_until="domcontentloaded", timeout=timeout_ms)
+        await progress_cb(88, {"stage": "dreamina_target_opened", "url": target})
+
+    final_info = await dreamina_fetch_sessionid_in_window(sess=sess, target_url=target)
+    await progress_cb(100, {"stage": "dreamina_sessionid_saved"})
+    return {
+        "ok": True,
+        "stage": "dreamina_direct_login_ready",
+        "branch": "direct_dreamina_login",
+        "platform_url": platform_url,
+        "platform_username": platform_username,
+        "login_url": entry,
+        "url": target,
+        "access_token": str((final_info or {}).get("access_token") or "").strip(),
+        "expires": (final_info or {}).get("expires"),
+        "cookie_name": (final_info or {}).get("cookie_name") or "sessionid",
+        "message": "已直接打开 Dreamina 国际站登录并读取 sessionid",
+    }
 
 
 async def dreamina_flow_open_account(
@@ -2544,6 +3737,267 @@ async def dreamina_admin_open_connect_page(
     }
 
 
+def _dreamina_parse_credit_number(raw: Any) -> Optional[int]:
+    s = _one_str(raw).replace(",", "")
+    if not s:
+        return None
+    m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([kKmM]?)", s)
+    if not m:
+        return None
+    try:
+        val = float(m.group(1))
+    except Exception:
+        return None
+    unit = (m.group(2) or "").lower()
+    if unit == "k":
+        val *= 1000
+    elif unit == "m":
+        val *= 1000000
+    return max(0, int(round(val)))
+
+
+def _dreamina_parse_credit_balance_from_text(text: Any) -> Optional[int]:
+    s = str(text or "")
+    if not s.strip():
+        return None
+    patterns = (
+        r"(?:Credit\s+balance|Credits?\s+balance)\s*[:：]?\s*([0-9][0-9,]*(?:\.[0-9]+)?\s*[kKmM]?)",
+        r"(?:积分余额|余额)\s*[:：]?\s*([0-9][0-9,]*(?:\.[0-9]+)?\s*[kKmM]?)",
+    )
+    for pat in patterns:
+        m = re.search(pat, s, re.I)
+        if m:
+            v = _dreamina_parse_credit_number(m.group(1))
+            if v is not None:
+                return v
+    return None
+
+
+def _dreamina_extract_sidebar_credit(snapshot: Any) -> Optional[int]:
+    if not isinstance(snapshot, dict):
+        return None
+    for item in snapshot.get("creditTexts") or []:
+        if not isinstance(item, dict):
+            continue
+        text = _one_str(item.get("text"))
+        if not text:
+            continue
+        # Only trust short text collected from credit-specific DOM nodes.
+        if len(text) > 32:
+            continue
+        v = _dreamina_parse_credit_number(text)
+        if v is not None:
+            return v
+    return None
+
+
+async def _dreamina_read_credit_ui_snapshot(page: Any) -> Dict[str, Any]:
+    if page is None:
+        return {}
+    return await page.evaluate(
+        """() => {
+          const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+          const creditTexts = [];
+          for (const el of Array.from(document.querySelectorAll('body *'))) {
+            const cls = String(el.className || '');
+            const text = norm(el.innerText || el.textContent || '');
+            if (!text) continue;
+            const r = el.getBoundingClientRect();
+            if (!r || r.width <= 0 || r.height <= 0) continue;
+            const classHit = /credit-amount|credit-display|credit-container/i.test(cls);
+            const textHit = /^[0-9]+(?:\\.[0-9]+)?\\s*[KkMm]?$/.test(text);
+            if (!classHit && !textHit) continue;
+            creditTexts.push({
+              text,
+              cls: cls.slice(0, 120),
+              x: Math.round(r.x),
+              y: Math.round(r.y),
+              w: Math.round(r.width),
+              h: Math.round(r.height),
+              area: Math.round(r.width * r.height),
+            });
+          }
+          creditTexts.sort((a, b) => a.area - b.area);
+          return {
+            bodyText: document.body ? document.body.innerText : '',
+            creditTexts: creditTexts.slice(0, 20),
+          };
+        }"""
+    )
+
+
+async def _dreamina_click_credit_ui_candidate(page: Any) -> bool:
+    if page is None:
+        return False
+    rect = await page.evaluate(
+        """() => {
+          const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+          const items = [];
+          const selectors = [
+            '[class*="credit-amount-text"]',
+            '[class*="credit-amount-container"]',
+            '[class*="credit-display-menu-container"]',
+            '[class*="credit-display-container"]',
+            '[class*="credit-container"]',
+          ];
+          for (const el of Array.from(document.querySelectorAll(selectors.join(',')))) {
+            const text = norm(el.innerText || el.textContent || '');
+            const r = el.getBoundingClientRect();
+            if (!text || !r || r.width <= 0 || r.height <= 0) continue;
+            if (!/[0-9]/.test(text)) continue;
+            items.push({
+              x: r.x,
+              y: r.y,
+              w: r.width,
+              h: r.height,
+              text,
+              area: r.width * r.height,
+            });
+          }
+          items.sort((a, b) => a.area - b.area);
+          return items[0] || null;
+        }"""
+    )
+    if not isinstance(rect, dict):
+        return False
+    try:
+        x = float(rect.get("x") or 0) + float(rect.get("w") or 0) / 2.0
+        y = float(rect.get("y") or 0) + float(rect.get("h") or 0) / 2.0
+        await page.mouse.click(x, y)
+        return True
+    except Exception:
+        return False
+
+
+def _dreamina_credit_info_from_ui(total_credit: int, *, source: str, raw_text: str = "") -> Dict[str, Any]:
+    total = max(0, int(total_credit or 0))
+    return {
+        "gift_credit": 0,
+        "purchase_credit": 0,
+        "vip_credit": 0,
+        "total_credit": total,
+        "cooldown_until": None,
+        "subscription_end_time": None,
+        "credits_life_end": None,
+        "source": source,
+        "_credit_balance_found": True,
+        "raw_text": safe_trim(raw_text, 500),
+    }
+
+
+async def _dreamina_fetch_credits_from_browser_ui(
+    *,
+    target_url: str,
+    db: Any = None,
+    picked: Any = None,
+    log_file: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    log_file = log_file or MONITOR_LOG_FILE
+    if db is None or picked is None:
+        return None
+
+    def _ctx_get(row: Any, key: str, default: Any = None) -> Any:
+        if isinstance(row, dict):
+            return row.get(key, default)
+        return getattr(row, key, default)
+
+    def _bool(v: Any, default: bool = False) -> bool:
+        if v is None:
+            return default
+        if isinstance(v, bool):
+            return v
+        return _one_str(v).lower() in ("1", "true", "yes", "y", "on")
+
+    mapping_id = int(_ctx_get(picked, "mapping_id", 0) or _ctx_get(picked, "id", 0) or 0)
+    row: Any = None
+    if mapping_id > 0:
+        try:
+            row = await db.get_task_type_window_context(mapping_id)
+        except Exception as e:
+            append_log(log_file, f"[dreamina] ui credit context lookup failed: mapping={mapping_id} err={safe_trim(str(e), 200)}")
+            row = None
+    src = row or picked
+
+    vendor = _one_str(_ctx_get(src, "vendor") or _ctx_get(src, "browser_vendor") or "roxy")
+    base_url = _one_str(_ctx_get(src, "lan_addr") or _ctx_get(src, "browser_base_url"))
+    access_key = _ctx_get(src, "access_key") if _ctx_get(src, "access_key") is not None else _ctx_get(src, "browser_access_key")
+    space_id = _one_str(_ctx_get(src, "space_id"))
+    window_key = _one_str(_ctx_get(src, "window_key"))
+    if not base_url or not space_id or not window_key:
+        append_log(log_file, f"[dreamina] ui credit skipped: missing browser context mapping={mapping_id}")
+        return None
+
+    target = _one_str(_ctx_get(src, "default_target_url")) or _one_str(target_url) or DEFAULT_DREAMINA_TARGET
+    headless = _bool(_ctx_get(src, "headless"), default=False)
+    pure_mode = _bool(_ctx_get(src, "pure_mode"), default=True)
+
+    sess = get_or_create_dreamina_session(
+        vendor=vendor,
+        base_url=base_url,
+        access_key=access_key,
+        space_id=space_id,
+        window_key=window_key,
+    )
+    sess.browser_headless = headless
+    sess.browser_pure_mode = pure_mode
+
+    async with sess._bring_drafts_lock:
+        await sess.ensure_open(
+            args=sess.browser_open_args,
+            force_open=sess.browser_force_open,
+            headless=headless,
+            acquire_bring_lock=False,
+            pure_mode=pure_mode,
+        )
+        await sess._bring_target_page_to_front(
+            refresh_target=False,
+            drafts_url=target,
+            acquire_bring_lock=False,
+            close_other_pages=False,
+        )
+        page = getattr(sess.pw_ctx, "page", None)
+        if page is None or sess._is_page_closed(page):
+            return None
+
+        snapshot = await _dreamina_read_credit_ui_snapshot(page)
+        body_text = str((snapshot or {}).get("bodyText") or "")
+        label_credit = _dreamina_parse_credit_balance_from_text(body_text)
+        sidebar_credit = _dreamina_extract_sidebar_credit(snapshot)
+
+        clicked = await _dreamina_click_credit_ui_candidate(page)
+        if clicked:
+            try:
+                await page.wait_for_timeout(1600)
+            except Exception:
+                await asyncio.sleep(1.6)
+            snapshot2 = await _dreamina_read_credit_ui_snapshot(page)
+            body_text2 = str((snapshot2 or {}).get("bodyText") or "")
+            label_credit2 = _dreamina_parse_credit_balance_from_text(body_text2)
+            if label_credit2 is not None:
+                append_log(log_file, f"[dreamina] ui credit balance={label_credit2} source=browser_popup")
+                try:
+                    await page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                return _dreamina_credit_info_from_ui(label_credit2, source="browser_ui_credit_balance", raw_text=body_text2)
+            if sidebar_credit is None:
+                sidebar_credit = _dreamina_extract_sidebar_credit(snapshot2)
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+
+        if label_credit is not None:
+            append_log(log_file, f"[dreamina] ui credit balance={label_credit} source=browser_body")
+            return _dreamina_credit_info_from_ui(label_credit, source="browser_ui_body", raw_text=body_text)
+        if sidebar_credit is not None:
+            append_log(log_file, f"[dreamina] ui credit balance={sidebar_credit} source=browser_sidebar")
+            return _dreamina_credit_info_from_ui(sidebar_credit, source="browser_ui_sidebar", raw_text=json.dumps((snapshot or {}).get("creditTexts") or [], ensure_ascii=False))
+
+    append_log(log_file, f"[dreamina] ui credit not found mapping={mapping_id}")
+    return None
+
+
 async def dreamina_fetch_credits_in_window(
     *,
     target_url: str,
@@ -2564,6 +4018,14 @@ async def dreamina_fetch_credits_in_window(
     log_file = log_file or MONITOR_LOG_FILE
     token = _one_str(access_token)
     if not token:
+        ui_info = await _dreamina_fetch_credits_from_browser_ui(
+            target_url=target_url,
+            db=db,
+            picked=picked,
+            log_file=log_file,
+        )
+        if isinstance(ui_info, dict) and ui_info.get("_credit_balance_found"):
+            return ui_info
         raise RuntimeError("Dreamina 本地读取余额缺少 sessionid/access_token")
 
     async def _resolve_system_proxy() -> str:
@@ -2712,6 +4174,14 @@ async def dreamina_fetch_credits_in_window(
                     data = None
     credit = (data or {}).get("credit") if isinstance(data, dict) else None
     if not isinstance(credit, dict):
+        ui_info = await _dreamina_fetch_credits_from_browser_ui(
+            target_url=target_url,
+            db=db,
+            picked=picked,
+            log_file=log_file,
+        )
+        if isinstance(ui_info, dict) and ui_info.get("_credit_balance_found"):
+            return ui_info
         raise RuntimeError(f"Dreamina user_credit 返回缺少 credit：status={tx.get('status')} body={safe_trim(str(tx.get('response_body') or obj), 500)}")
     def _credit_int(v: Any) -> int:
         try:
@@ -2723,6 +4193,15 @@ async def dreamina_fetch_credits_in_window(
     purchase_credit = _credit_int(credit.get("purchase_credit"))
     vip_credit = _credit_int(credit.get("vip_credit"))
     total_credit = gift_credit + purchase_credit + vip_credit
+    if total_credit <= 0:
+        ui_info = await _dreamina_fetch_credits_from_browser_ui(
+            target_url=target_url,
+            db=db,
+            picked=picked,
+            log_file=log_file,
+        )
+        if isinstance(ui_info, dict) and ui_info.get("_credit_balance_found"):
+            return ui_info
 
     cooldown_until: Optional[str] = None
     credits_life_end: Optional[int] = None
@@ -2867,20 +4346,23 @@ async def refresh_dreamina_balance_best_effort(
 # ---- 主入口 ----
 
 _DREAMINA_UI_MODEL_FAST = "Dreamina Seedance 2.0 Fast"
+_DREAMINA_UI_MODEL_MINI = "Dreamina Seedance 2.0 Mini"
 _DREAMINA_UI_MODEL_PRO = "Dreamina Seedance 2.0"
 
 def _dreamina_resolve_ui_model(payload: Dict[str, Any], *, has_image: bool = False) -> str:
-    """把外部模型名规整为 Dreamina 页面中仅支持的两个视频模型显示名。"""
+    """Map external model names to the Dreamina UI model display name."""
     model_key = _dreamina_resolve_model(payload, has_image=has_image)
     raw = _one_str((payload or {}).get("model_name") or (payload or {}).get("model"))
-    if raw in (_DREAMINA_UI_MODEL_FAST, _DREAMINA_UI_MODEL_PRO):
+    if raw in (_DREAMINA_UI_MODEL_MINI, _DREAMINA_UI_MODEL_FAST, _DREAMINA_UI_MODEL_PRO):
         return raw
+    if _dreamina_is_seedance20_mini(model_key) or "mini" in raw.lower():
+        return _DREAMINA_UI_MODEL_MINI
     if _dreamina_is_seedance20_fast(model_key) or "fast" in raw.lower():
         return _DREAMINA_UI_MODEL_FAST
     if _dreamina_is_seedance20_pro(model_key) or model_key == _MODEL_SEEDANCE_20_PRO:
         return _DREAMINA_UI_MODEL_PRO
     raise NonPenalizedTaskError(
-        "Dreamina 视频生成仅支持 Dreamina Seedance 2.0 Fast / Dreamina Seedance 2.0",
+        "Dreamina 视频生成仅支持 Dreamina Seedance 2.0 Mini / Dreamina Seedance 2.0 Fast / Dreamina Seedance 2.0",
         status_code=400,
     )
 
@@ -2929,7 +4411,7 @@ class DreaminaUIAutomationController(FingerprintBrowserAutomationBase):
                     const txt = norm(el.innerText || el.textContent || '');
                     const first = norm(txt.split('\\n')[0]);
                     if (first === name || txt === name) return true;
-                    if (name === 'Dreamina Seedance 2.0' && first === 'Dreamina Seedance 2.0 Fast') return false;
+                    if (name === 'Dreamina Seedance 2.0' && (first === 'Dreamina Seedance 2.0 Fast' || first === 'Dreamina Seedance 2.0 Mini')) return false;
                     return txt.startsWith(name);
                 };
                 const el = opts.find(isTarget);
@@ -2967,7 +4449,8 @@ class DreaminaUIAutomationController(FingerprintBrowserAutomationBase):
                 return
             # 模型卡片的可访问名可能包含描述文案；保留为后备候选。
             if txt.startswith(option_name) and not (
-                option_name == _DREAMINA_UI_MODEL_PRO and first_line == _DREAMINA_UI_MODEL_FAST
+                option_name == _DREAMINA_UI_MODEL_PRO
+                and first_line in (_DREAMINA_UI_MODEL_FAST, _DREAMINA_UI_MODEL_MINI)
             ):
                 candidates.append((i, txt))
         if candidates:
@@ -3681,19 +5164,26 @@ async def dreamina_workflow(
     duration = _dreamina_resolve_duration(p)
     omni_refs = _dreamina_collect_external_omni_image_refs(p)
     first_last_refs = _dreamina_collect_first_last_image_refs(p)
+    video_refs = _dreamina_collect_video_refs(p)
+    audio_refs = _dreamina_collect_audio_refs(p)
+    dry_run = _dreamina_bool(p.get("dry_run") or p.get("dryRun") or p.get("skip_submit") or p.get("skipSubmit") or p.get("preview_only"))
     raw_mode = _one_str(p.get("function_mode")).lower()
     if raw_mode.replace("-", "_").replace(" ", "_") in ("first_last_frames", "first_last", "first_and_last_frames"):
+        if video_refs or audio_refs:
+            raise NonPenalizedTaskError("Dreamina first_last_frames only supports first/last images", status_code=400, content_violation=True)
         image_refs = first_last_refs[:2]
     else:
         image_refs = omni_refs
-    video_mode, reference_mode = _dreamina_resolve_ui_mode(p, image_refs)
+    video_mode, reference_mode = _dreamina_resolve_ui_mode(p, image_refs + video_refs + audio_refs)
     if reference_mode == "First and last frames":
+        if video_refs or audio_refs:
+            raise NonPenalizedTaskError("Dreamina first_last_frames only supports first/last images", status_code=400, content_violation=True)
         image_refs = first_last_refs[:2]
         if not image_refs:
             raise NonPenalizedTaskError("参考图请使用https地址", status_code=400, content_violation=True)
     elif len(image_refs) > 9:
         raise NonPenalizedTaskError("Omni reference 超过9张参考图", status_code=400, content_violation=True)
-    ui_model = _dreamina_resolve_ui_model(p, has_image=bool(image_refs))
+    ui_model = _dreamina_resolve_ui_model(p, has_image=bool(image_refs or video_refs or audio_refs))
     target_page = (
         _one_str(default_target_url)
         or _one_str(p.get("dreamina_url") or p.get("target_url"))
@@ -3734,7 +5224,7 @@ async def dreamina_workflow(
     if prompt_subject_refs:
         append_log(log_file, f"[dreamina-subject-ref] prompt_ids={prompt_subject_ids} matched={len(prompt_subject_refs)} refs={safe_trim(_compact_json(prompt_subject_refs), 1200)}")
         image_refs = omni_refs
-        video_mode, reference_mode = _dreamina_resolve_ui_mode(p, image_refs + prompt_subject_refs)
+        video_mode, reference_mode = _dreamina_resolve_ui_mode(p, image_refs + prompt_subject_refs + video_refs + audio_refs)
         ui_model = _dreamina_resolve_ui_model(p, has_image=True)
     elif prompt_subject_ids:
         append_log(log_file, f"[dreamina-subject-ref] prompt_ids={prompt_subject_ids} matched=0, ignored")
@@ -3758,6 +5248,8 @@ async def dreamina_workflow(
         "aspect_ratio": aspect_ratio,
         "duration": duration,
         "image_count": len(image_refs) + len(prompt_subject_refs),
+        "video_count": len(video_refs),
+        "audio_count": len(audio_refs),
     })
     '''
     if should_use_extension_executor(p):
@@ -3841,8 +5333,8 @@ async def dreamina_workflow(
                         except Exception:
                             pass
 
-                model_key = _dreamina_resolve_model(p, has_image=bool(image_refs))
-                resolution = _dreamina_resolve_resolution(p)
+                model_key = _dreamina_resolve_model(p, has_image=bool(image_refs or video_refs or audio_refs))
+                resolution = _dreamina_resolve_resolution(p, model_key)
                 width, height = _dreamina_resolution_size(resolution, aspect_ratio)
 
                 external_prompt_ref_count = len(prompt_image_tokens)
@@ -3866,6 +5358,32 @@ async def dreamina_workflow(
                         ref["uri"] = uri
                     await progress_cb(5, {"stage": "upload_images_done", "count": len(upload_uris)})
 
+                media_upload_count = sum(1 for ref in (video_refs + audio_refs) if not _one_str((ref or {}).get("vid")))
+                if media_upload_count:
+                    await progress_cb(5, {
+                        "stage": "upload_media_api",
+                        "count": media_upload_count,
+                        "video_count": sum(1 for ref in video_refs if not _one_str((ref or {}).get("vid"))),
+                        "audio_count": sum(1 for ref in audio_refs if not _one_str((ref or {}).get("vid"))),
+                    })
+                    await _dreamina_upload_media_refs_via_vod(
+                        page,
+                        video_refs,
+                        media_kind="video",
+                        log_file=log_file,
+                        api_base=sess.dreamina_api_base,
+                        header_loc=sess.dreamina_header_loc,
+                    )
+                    await _dreamina_upload_media_refs_via_vod(
+                        page,
+                        audio_refs,
+                        media_kind="audio",
+                        log_file=log_file,
+                        api_base=sess.dreamina_api_base,
+                        header_loc=sess.dreamina_header_loc,
+                    )
+                    await progress_cb(6, {"stage": "upload_media_done", "count": media_upload_count})
+
                 has_prompt_refs = bool(prompt_subject_refs or prompt_image_tokens)
                 if has_prompt_refs:
                     prompt_for_body, material_list, meta_list, material_kinds = _dreamina_bind_prompt_materials(
@@ -3874,7 +5392,14 @@ async def dreamina_workflow(
                         image_refs,
                     )
                     append_log(log_file, f"[dreamina-material-bind] kinds={material_kinds} prompt={safe_trim(prompt_for_body, 300)} material_count={len(material_list)} meta_count={len(meta_list)}")
-                elif image_refs:
+                    if video_refs or audio_refs:
+                        for ref in video_refs:
+                            material_list.append(_dreamina_video_material(ref))
+                        for ref in audio_refs:
+                            material_list.append(_dreamina_audio_material(ref))
+                        material_kinds = [_dreamina_material_kind(m) for m in material_list]
+                        meta_list = _dreamina_build_mixed_meta_list(prompt_for_body, material_kinds)
+                elif image_refs or video_refs or audio_refs:
                     prompt_for_body = prompt
                     material_list = []
                     for ref in image_refs:
@@ -3883,7 +5408,15 @@ async def dreamina_workflow(
                             "type": "", "id": str(uuid.uuid4()), "material_type": "image",
                             "image_info": {**_dreamina_image_info(uri, int(ref.get("width") or width), int(ref.get("height") or height)), "aigc_image": {"type": "", "id": str(uuid.uuid4())}, "title": "test"},
                         })
-                    meta_list = _dreamina_build_meta_list(prompt, len(image_refs))
+                    for ref in video_refs:
+                        material_list.append(_dreamina_video_material(ref))
+                    for ref in audio_refs:
+                        material_list.append(_dreamina_audio_material(ref))
+                    material_kinds = [_dreamina_material_kind(m) for m in material_list]
+                    if video_refs or audio_refs:
+                        meta_list = _dreamina_build_mixed_meta_list(prompt, material_kinds)
+                    else:
+                        meta_list = _dreamina_build_meta_list(prompt, len(image_refs))
                 else:
                     prompt_for_body = prompt
                     material_list = []
@@ -3902,6 +5435,38 @@ async def dreamina_workflow(
                     width=width,
                     height=height,
                 )
+                material_types = [_dreamina_material_kind(m) for m in (material_list or [])]
+                if dry_run:
+                    await progress_cb(100, {
+                        "stage": "dry_run_ready",
+                        "would_submit": False,
+                        "model_name": model_key,
+                        "function_mode": function_mode,
+                        "material_types": material_types,
+                        "image_count": len(image_refs) + len(prompt_subject_refs),
+                        "video_count": len(video_refs),
+                        "audio_count": len(audio_refs),
+                    })
+                    return {
+                        "type": "dreamina_workflow_dry_run",
+                        "message": "Dreamina dry_run finished before generate submit",
+                        "would_submit": False,
+                        "submit_id": submit_id,
+                        "workflow_kind": "video",
+                        "function_mode": function_mode,
+                        "reference_mode": reference_mode,
+                        "model_key": model_key,
+                        "model_name": ui_model,
+                        "aspect_ratio": aspect_ratio,
+                        "resolution": resolution,
+                        "duration": duration,
+                        "image_count": len(image_refs) + len(prompt_subject_refs),
+                        "video_count": len(video_refs),
+                        "audio_count": len(audio_refs),
+                        "material_types": material_types,
+                        "scene_material_types": [_DREAMINA_MATERIAL_TYPE_CODES[x] for x in material_types if x in _DREAMINA_MATERIAL_TYPE_CODES],
+                        "generate_body": generate_body,
+                    }
                 generate_url = (
                     f"{sess.dreamina_api_base}{_DREAMINA_GENERATE_PATH}"
                     f"?aid={_DREAMINA_AID}&device_platform=web&region={_DREAMINA_REGION}"
@@ -3998,6 +5563,8 @@ async def dreamina_workflow(
                 "submit_id": submit_id,
                 "generate_id": submit_result.get("generate_id"),
                 "image_count": len(image_refs) + len(prompt_subject_refs),
+                "video_count": len(video_refs),
+                "audio_count": len(audio_refs),
                 "item_id": poll_result.get("item_id"),
                 "elapsed_ms": elapsed_ms,
             }

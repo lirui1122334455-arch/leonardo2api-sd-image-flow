@@ -285,6 +285,7 @@
                   <div class="btn-group btn-group-sm" role="group" aria-label="bulk-actions">
                     <button class="btn btn-outline-success" id="btnBulkOpen">批量打开</button>
                     <button class="btn btn-outline-danger" id="btnBulkClose">批量关闭</button>
+                    <button class="btn btn-outline-danger d-none" id="btnBulkDreaminaLogout" title="关闭窗口、清缓存/Cookie，并解除窗口账号绑定；不进入页面点退出">批量即梦下号</button>
                     <button class="btn btn-outline-danger" id="btnBulkTransfer">批量转移</button>
                     <button class="btn btn-outline-warning" id="btnBulkHeadlessOn">批量开无头</button>
                     <button class="btn btn-outline-secondary" id="btnBulkHeadlessOff">批量关无头</button>
@@ -2441,6 +2442,7 @@
         const hintTopEl = document.getElementById("currentTypeHintTop");
         if (hintEl) hintEl.textContent = hint;
         if (hintTopEl) hintTopEl.textContent = hint;
+        syncDreaminaBulkLogoutButton();
       }
 
       async function saveType() {
@@ -2525,6 +2527,7 @@
           updateMappingsHeaderSummaryUI();
           updateMappingPaginationUI(0);
           document.getElementById("mappingBody").innerHTML = `<tr><td colspan="20" class="text-muted small">请先选择任务类型</td></tr>`;
+          syncDreaminaBulkLogoutButton();
           return;
         }
         const prevSelected = preserveSelection ? new Set(state.mapSelected || []) : new Set();
@@ -2544,6 +2547,7 @@
           ui.mappingList.page = 1;
         }
         updateMapSelectedCountUI();
+        syncDreaminaBulkLogoutButton();
         renderMappings();
         if (ui.mappingSortKey === "proxy") {
           preloadMissingProxyCachesForItems(state.mappings || [])
@@ -2858,6 +2862,13 @@
         all.indeterminate = checkedCount > 0 && checkedCount < boxes.length;
       }
 
+      function syncDreaminaBulkLogoutButton() {
+        const btn = document.getElementById("btnBulkDreaminaLogout");
+        if (!btn) return;
+        const handler = String(state.current?.create_task_handler || "").trim().toLowerCase();
+        btn.classList.toggle("d-none", handler !== "dreamina_workflow");
+      }
+
       function getFilteredMappings(items) {
         const q = String(document.getElementById("mappingFilter")?.value || "").trim().toLowerCase();
         const hintEl = document.getElementById("mappingFilterHint");
@@ -2931,13 +2942,13 @@
           const _openAccountTitle = _isVeo
             ? "开号/连接：连接后自动判断是否为 Google 登录页；若页面可见 @gmail.com（选账号列表）则走「连接置前」自动点选；否则走完整 Google 登录并打开 Flow（完成后断开 CDP）"
             : _isDreamina
-              ? "开号/连接：打开 Dreamina 目标页并断开 CDP；默认使用窗口 Cookie，可用「access_token」列获取/保存 sessionid"
+              ? "上号/连接：直接打开 Dreamina 国际站，使用窗口绑定账号登录，读取并保存 Cookies 中的 sessionid"
               : _isGrok
                 ? "连接：打开 Grok 默认页并断开 CDP；默认用窗口 Cookie，可选在「access_token」列保存 Grok SSO（与 grok2api 同源）"
                 : _isGpt
                   ? "连接：打开 ChatGPT 页面并断开 CDP；点击「access_token」列的更新可读取 ChatGPT 长 access_token"
                 : "开号：Sora 走 Plus 注册自动化；Veo/Dreamina 为打开目标页并断开 CDP";
-          const _openAccountLabel = (_isVeo || _isDreamina) ? "开号/连接" : ((_isGrok || _isGpt) ? "连接" : "开号");
+          const _openAccountLabel = _isDreamina ? "上号/连接" : (_isVeo ? "开号/连接" : ((_isGrok || _isGpt) ? "连接" : "开号"));
           return `
           <tr class="small2" data-mid="${m.id}">
             <td>
@@ -4455,7 +4466,7 @@
             (_h === "veo_workflow"
               ? "已完成：Google 登录并打开 Flow，已断开自动化连接"
               : _h === "dreamina_workflow"
-                ? "已打开 Dreamina 页面，已断开自动化连接（请在本窗口完成登录/确认 Cookie）"
+                ? "已直接打开 Dreamina 国际站上号，并保存 sessionid"
                 : _h === "grok_workflow"
                   ? "已打开 Grok 页面，已断开自动化连接（请在本窗口完成登录）"
                   : _h === "gpt_workflow"
@@ -5137,6 +5148,7 @@
 
         setBtnDisabledById("btnBulkOpen", true);
         setBtnDisabledById("btnBulkClose", true);
+        setBtnDisabledById("btnBulkDreaminaLogout", true);
         setBtnDisabledById("btnBulkTransfer", true);
         setBtnDisabledById("btnBulkHeadlessOn", true);
         setBtnDisabledById("btnBulkHeadlessOff", true);
@@ -5163,6 +5175,7 @@
         } finally {
           setBtnDisabledById("btnBulkOpen", false);
           setBtnDisabledById("btnBulkClose", false);
+          setBtnDisabledById("btnBulkDreaminaLogout", false);
           setBtnDisabledById("btnBulkTransfer", false);
           setBtnDisabledById("btnBulkHeadlessOn", false);
           setBtnDisabledById("btnBulkHeadlessOff", false);
@@ -5199,6 +5212,47 @@
             await postJson(`/api/admin/task-type-windows/${mappingId}/manual-close`, { method: "POST" });
           },
         });
+      }
+
+      async function bulkDreaminaLogoutSelected() {
+        const ids = getSelectedMappingIds();
+        if (!ids.length) return toast("请先勾选窗口", "error");
+        const handler = String(state.current?.create_task_handler || "").trim().toLowerCase();
+        if (handler !== "dreamina_workflow") return toast("当前任务类型不是即梦，不能批量下号", "warning");
+        if (!confirm(`确定批量下号 ${ids.length} 个即梦窗口吗？\n\n流程：关闭窗口、清缓存/Cookie、解除账号绑定；不会进入网页点击退出登录。`)) return;
+
+        const btn = document.getElementById("btnBulkDreaminaLogout");
+        const hint = document.getElementById("bulkProgressHint");
+        const showHint = (text) => {
+          if (!hint) return;
+          hint.style.display = "";
+          hint.textContent = text;
+        };
+        try {
+          setBtnBusy(btn, true, { loadingText: "下号中" });
+          showHint(`批量即梦下号：提交 ${ids.length} 个窗口`);
+          const d = await postJson(`/api/admin/task-type-windows/batch-dreamina-logout`, {
+            method: "POST",
+            body: { mapping_ids: ids, local_only: false },
+          });
+          const ok = Number(d?.ok || 0) || 0;
+          const partial = Number(d?.partial || 0) || 0;
+          const failed = Number(d?.failed || 0) || 0;
+          showHint(`批量即梦下号完成：成功 ${ok}，部分完成 ${partial}，失败 ${failed}`);
+          toast(`批量即梦下号完成：成功 ${ok}，部分完成 ${partial}，失败 ${failed}`, failed || partial ? "warning" : "success");
+          await loadMappings({ preserveSelection: true });
+          window.setTimeout(() => {
+            if (hint) {
+              hint.style.display = "none";
+              hint.textContent = "";
+            }
+          }, 1800);
+        } catch (e) {
+          toast(e.message || "批量即梦下号失败", "error");
+          showHint(`批量即梦下号失败：${e.message || "未知错误"}`);
+        } finally {
+          setBtnBusy(btn, false);
+        }
       }
 
       async function bulkHeadlessOnSelected() {
@@ -5599,6 +5653,7 @@
       });
       document.getElementById("btnBulkOpen")?.addEventListener("click", bulkOpenSelected);
       document.getElementById("btnBulkClose")?.addEventListener("click", bulkCloseSelected);
+      document.getElementById("btnBulkDreaminaLogout")?.addEventListener("click", bulkDreaminaLogoutSelected);
       document.getElementById("btnBulkTransfer")?.addEventListener("click", bulkTransferSelected);
       document.getElementById("btnBulkHeadlessOn")?.addEventListener("click", bulkHeadlessOnSelected);
       document.getElementById("btnBulkHeadlessOff")?.addEventListener("click", bulkHeadlessOffSelected);

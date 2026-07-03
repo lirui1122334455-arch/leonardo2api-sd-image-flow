@@ -316,17 +316,18 @@
               <span class="text-muted small ms-auto" id="accountsSummary"></span>
             </div>
             <div class="mb-2">
-              <label class="form-label small mb-1">批量新增（格式：邮箱——密码——忽略——EFA，或 邮箱----密码----忽略----EFA----忽略，每行一个）</label>
+              <label class="form-label small mb-1">批量新增（格式：邮箱----密码，或 邮箱----密码----忽略----EFA，每行一个）</label>
               <div class="row g-2 align-items-end mb-2">
                 <div class="col-md-8 col-lg-6">
                   <label class="form-label small mb-1" for="accountsImportPlatformUrl">平台URL</label>
                   <input class="form-control form-control-sm mono" id="accountsImportPlatformUrl" value="https://app.leonardo.ai/" placeholder="https://app.leonardo.ai/" />
                 </div>
               </div>
-              <textarea class="form-control form-control-sm mono" id="accountsImportText" rows="6" placeholder="example@gmail.com——password——ignore——efa_token&#10;example@gmail.com----password----ignore----efa_token----ignore"></textarea>
+              <textarea class="form-control form-control-sm mono" id="accountsImportText" rows="6" placeholder="example@gmail.com----password&#10;example@gmail.com----password----ignore----efa_token"></textarea>
               <div class="d-flex justify-content-end gap-2 mt-2">
                 <button class="btn btn-success btn-sm" id="btnImportAccounts">批量新增</button>
                 <button class="btn btn-primary btn-sm" id="btnImportBindAccounts">导入并绑定/打开</button>
+                <button class="btn btn-outline-primary btn-sm" id="btnImportBindDreaminaAccounts">导入并绑定/上号即梦</button>
                 <button class="btn btn-danger btn-sm" id="btnSyncAccounts">同步该空间账号到本地</button>
               </div>
               <div class="small text-muted mt-1" id="accountsImportBindSummary"></div>
@@ -1396,6 +1397,7 @@
             try {
               const latestAccounts = await loadAllProjectAccounts({ force: true });
               accountsState.accounts = latestAccounts;
+              await loadLocalAccounts(spk, { force: true });
               fillAccountSelects(spk);
               if (accountsState.spacePk) renderAccounts();
             } catch (e) {
@@ -1568,6 +1570,7 @@
             try {
               const latestAccounts = await loadAllProjectAccounts({ force: true });
               accountsState.accounts = latestAccounts;
+              await loadLocalAccounts(spk, { force: true });
               fillAccountSelects(spk);
               if (accountsState.spacePk) renderAccounts();
             } catch (e) {
@@ -2322,6 +2325,7 @@
       const btnSyncAccounts = document.getElementById("btnSyncAccounts");
       const btnImportAccounts = document.getElementById("btnImportAccounts");
       const btnImportBindAccounts = document.getElementById("btnImportBindAccounts");
+      const btnImportBindDreaminaAccounts = document.getElementById("btnImportBindDreaminaAccounts");
       const accountsImportBindSummary = document.getElementById("accountsImportBindSummary");
       const btnDeleteSelectedAccounts = document.getElementById("btnDeleteSelectedAccounts");
       const accountSelectionSummary = document.getElementById("accountSelectionSummary");
@@ -2348,6 +2352,7 @@
         if (btnSyncAccounts) btnSyncAccounts.disabled = !!loading;
         if (btnImportAccounts) btnImportAccounts.disabled = !!loading;
         if (btnImportBindAccounts) btnImportBindAccounts.disabled = !!loading;
+        if (btnImportBindDreaminaAccounts) btnImportBindDreaminaAccounts.disabled = !!loading;
         if (accountsImportPlatformUrl) accountsImportPlatformUrl.disabled = !!loading;
         if (btnDeleteSelectedAccounts) btnDeleteSelectedAccounts.disabled = !!loading || selectedAccountIds.size <= 0;
         if (loading) {
@@ -2531,7 +2536,9 @@
 
       async function loadLocalAccounts(spacePk, { force } = { force: false }) {
         if (!force && accountsCache.has(spacePk)) return accountsCache.get(spacePk) || [];
-        const r = await adminFetch(`/api/admin/accounts`);
+        const spk = parseInt(String(spacePk || "0"), 10) || 0;
+        const url = spk > 0 ? `/api/admin/spaces/${spk}/accounts` : `/api/admin/accounts`;
+        const r = await adminFetch(url);
         if (!r) return [];
         const d = await r.json();
         if (!r.ok) throw new Error(d.detail || "读取本地账号失败");
@@ -2609,10 +2616,69 @@
         return { curId, matchedCurItem, curName, curUrl };
       }
 
+      function getSpaceMeta(spacePk) {
+        const spk = parseInt(String(spacePk || "0"), 10) || 0;
+        if (!spk) return null;
+        return collectAllSpacesFromTree(state.tree || []).find(x => Number(x.space_pk || 0) === spk) || null;
+      }
+
+      function platformKindFromUrl(url) {
+        const raw = String(url || "").trim().toLowerCase();
+        if (!raw) return "";
+        if (raw.includes("leonardo.ai")) return "leonardo";
+        if (raw.includes("dreamina.capcut.com") || raw.includes("capcut.com")) return "dreamina";
+        return "";
+      }
+
+      function inferAccountSelectPlatformKind(sel) {
+        const byUrl = platformKindFromUrl(sel?.dataset?.current_url || "");
+        if (byUrl) return byUrl;
+        const spacePk = parseInt(String(sel?.dataset?.space_pk || "0"), 10) || 0;
+        const meta = getSpaceMeta(spacePk) || {};
+        const hay = [
+          meta.space_name,
+          meta.project_name,
+          meta.browser_name,
+        ].filter(Boolean).join(" ").toLowerCase();
+        if (hay.includes("即梦") || hay.includes("dreamina") || hay.includes("jimeng") || hay.includes("capcut")) return "dreamina";
+        if (hay.includes("leonardo")) return "leonardo";
+        return "";
+      }
+
+      function filterAccountsForSelect(sel, rawItems) {
+        const spacePk = parseInt(String(sel?.dataset?.space_pk || "0"), 10) || 0;
+        const kind = inferAccountSelectPlatformKind(sel);
+        let items = normalizeAccounts(rawItems || []).filter(a => Number(a.deleted || 0) !== 1);
+        if (spacePk > 0) {
+          items = items.filter(a => {
+            const spk = Number(a.space_pk || 0) || 0;
+            return !spk || spk === spacePk;
+          });
+        }
+        if (kind) {
+          items = items.filter(a => platformKindFromUrl(a.platform_url) === kind);
+        }
+        return items;
+      }
+
+      function defaultAccountPlatformUrlForSpace(spacePk) {
+        const meta = getSpaceMeta(spacePk) || {};
+        const hay = [
+          meta.space_name,
+          meta.project_name,
+          meta.browser_name,
+        ].filter(Boolean).join(" ").toLowerCase();
+        if (hay.includes("即梦") || hay.includes("dreamina") || hay.includes("jimeng") || hay.includes("capcut")) {
+          return "https://dreamina.capcut.com/";
+        }
+        if (hay.includes("leonardo")) return "https://app.leonardo.ai/";
+        return "https://app.leonardo.ai/";
+      }
+
       function fillAccountSelects(spacePk) {
-        const items = normalizeAccounts(accountsCache.get(spacePk) || []).filter(a => Number(a.deleted || 0) !== 1);
         const selects = document.querySelectorAll(`select[data-role="accountSelect"][data-space_pk="${spacePk}"]`);
         selects.forEach(sel => {
+          const items = filterAccountsForSelect(sel, accountsCache.get(spacePk) || []);
           const { curId, matchedCurItem, curName, curUrl } = _matchAccountForSelect(sel, items);
           if (matchedCurItem) {
             const label = `${String(matchedCurItem.id || "-")}. ${accountLabel(matchedCurItem)}`;
@@ -2634,7 +2700,7 @@
         const spacePk = parseInt(sel.dataset.space_pk || "", 10);
         if (!spacePk) return;
         if (sel.dataset._accountPopulated === "1") return;
-        const items = normalizeAccounts(accountsCache.get(spacePk) || []).filter(a => Number(a.deleted || 0) !== 1);
+        const items = filterAccountsForSelect(sel, accountsCache.get(spacePk) || []);
         const { curId, matchedCurItem, curName, curUrl } = _matchAccountForSelect(sel, items);
         const selectedValue = matchedCurItem ? String(matchedCurItem.account_id) : (curId || "0");
         const fallbackCur = (curId && !matchedCurItem)
@@ -2657,7 +2723,13 @@
         accountsState.spacePk = spacePk;
         document.getElementById("accountsModalTitle").textContent = `账号管理（全局）`;
         if (accountsFilter) accountsFilter.value = "";
-        if (accountsImportPlatformUrl) accountsImportPlatformUrl.value = accountsImportPlatformUrl.value.trim() || "https://app.leonardo.ai/";
+        if (accountsImportPlatformUrl) {
+          const cur = accountsImportPlatformUrl.value.trim();
+          const nextDefault = defaultAccountPlatformUrlForSpace(spacePk);
+          if (!cur || cur === "https://app.leonardo.ai/" || cur === "https://dreamina.capcut.com/") {
+            accountsImportPlatformUrl.value = nextDefault;
+          }
+        }
         if (accountsImportText) accountsImportText.value = "";
         if (accountsImportBindSummary) accountsImportBindSummary.textContent = "";
         selectedAccountIds.clear();
@@ -2671,8 +2743,8 @@
           setAccountsLoading(true);
           const items = await loadAllProjectAccounts({ force: true });
           accountsState.accounts = items;
-          accountsCache.set(spacePk, items);
           renderAccounts();
+          await loadLocalAccounts(spacePk, { force: true });
           fillAccountSelects(spacePk);
         } catch (e) {
           toast(e.message || "读取账号失败", "error");
@@ -2704,6 +2776,12 @@
 
       function getAccountsImportPlatformUrl() {
         return String(accountsImportPlatformUrl?.value || "").trim() || "https://app.leonardo.ai/";
+      }
+
+      function getDreaminaImportPlatformUrl() {
+        const raw = String(accountsImportPlatformUrl?.value || "").trim();
+        if (!raw || raw === "https://app.leonardo.ai/") return "https://dreamina.capcut.com/";
+        return raw;
       }
 
       async function importAccounts(spacePk, content, fromEl) {
@@ -2789,6 +2867,49 @@
         }
       }
 
+      async function importBindDreaminaAccounts(spacePk, content, fromEl) {
+        const txt = String(content || "").trim();
+        if (!txt) return toast("请先粘贴导入内容", "warning");
+        if (!confirm("确认导入账号，并自动绑定到即梦窗口、直接打开 Dreamina 国际站上号吗？")) return;
+        const btn = fromEl;
+        try {
+          if (accountsImportBindSummary) accountsImportBindSummary.textContent = "";
+          setBtnBusy(btn, true, { loadingText: "上号中..." });
+          const r = await adminFetch(`/api/admin/spaces/${spacePk}/accounts/import-bind`, {
+            method: "POST",
+            body: JSON.stringify({
+              content: txt,
+              platform_url: getDreaminaImportPlatformUrl(),
+              task_type_code: "dreamina_workflow",
+              low_credit_threshold: 255,
+              replace_low_credit: true,
+              bind_empty_windows: true,
+              add_to_task_pool: true,
+              open_after_bind: true,
+              open_account_after_bind: true,
+              auto_create_windows: true,
+              auto_create_window_max: 10,
+              refresh_quota_after_bind: true,
+              daily_quota: 9999,
+              remaining_quota: 0,
+              open_browser_only: false,
+              headless: false,
+            }),
+          });
+          if (!r) return;
+          const d = await r.json();
+          if (!r.ok) throw new Error(d.detail || "即梦导入上号失败");
+          renderImportBindResult(d);
+          toast(d.message || "即梦导入上号完成", d.success ? "success" : "warning");
+          if (accountsImportText && d.success) accountsImportText.value = "";
+          await refreshAccounts(spacePk);
+        } catch (e) {
+          toast(e.message || "即梦导入上号失败", "error");
+        } finally {
+          setBtnBusy(btn, false);
+        }
+      }
+
       async function hardDeleteAccountRequest(spacePk, accountId) {
         const spk = parseInt(String(spacePk || "0"), 10) || 0;
         const aid = parseInt(String(accountId || "0"), 10) || 0;
@@ -2843,6 +2964,8 @@
           if (btnRefreshAccounts) btnRefreshAccounts.disabled = true;
           if (btnSyncAccounts) btnSyncAccounts.disabled = true;
           if (btnImportAccounts) btnImportAccounts.disabled = true;
+          if (btnImportBindAccounts) btnImportBindAccounts.disabled = true;
+          if (btnImportBindDreaminaAccounts) btnImportBindDreaminaAccounts.disabled = true;
 
           for (let i = 0; i < selectedItems.length; i += 1) {
             const item = selectedItems[i];
@@ -2873,6 +2996,8 @@
           if (btnRefreshAccounts) btnRefreshAccounts.disabled = false;
           if (btnSyncAccounts) btnSyncAccounts.disabled = false;
           if (btnImportAccounts) btnImportAccounts.disabled = false;
+          if (btnImportBindAccounts) btnImportBindAccounts.disabled = false;
+          if (btnImportBindDreaminaAccounts) btnImportBindDreaminaAccounts.disabled = false;
           if (accountSelectionSummary && selectedAccountIds.size <= 0) accountSelectionSummary.textContent = "";
           updateAccountSelectionUi();
         }
@@ -2985,6 +3110,12 @@
         btnImportBindAccounts.addEventListener("click", async () => {
           if (!accountsState.spacePk) return;
           await importBindAccounts(accountsState.spacePk, accountsImportText?.value || "", btnImportBindAccounts);
+        });
+      }
+      if (btnImportBindDreaminaAccounts) {
+        btnImportBindDreaminaAccounts.addEventListener("click", async () => {
+          if (!accountsState.spacePk) return;
+          await importBindDreaminaAccounts(accountsState.spacePk, accountsImportText?.value || "", btnImportBindDreaminaAccounts);
         });
       }
       if (btnDeleteSelectedAccounts) {
@@ -4647,7 +4778,7 @@
           const urlCell = row ? row.querySelector(`[data-role="platformUrlCell"]`) : null;
           const deleteBtn = row ? row.querySelector(`[data-action="delete_window"]`) : null;
           const selectBox = row ? row.querySelector(`input[data-role="windowSelect"]`) : null;
-          const arr = normalizeAccounts(accountsCache.get(spacePk) || []);
+          const arr = filterAccountsForSelect(el, accountsCache.get(spacePk) || []);
           const picked = accountId > 0 ? arr.find(x => String(x.account_id) === String(accountId)) : null;
           if (picked) {
             el.dataset.current_account = String(picked.platform_username || "").trim();

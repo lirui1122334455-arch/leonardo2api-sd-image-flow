@@ -115,6 +115,44 @@ def _same_main_domain(url_a: str, url_b: str) -> bool:
     return _main_domain(host_a) == _main_domain(host_b)
 
 
+def _account_platform_kind_from_url(url: str) -> str:
+    host = _safe_hostname(url)
+    if not host:
+        return ""
+    if host == "leonardo.ai" or host.endswith(".leonardo.ai"):
+        return "leonardo"
+    if host == "capcut.com" or host.endswith(".capcut.com"):
+        return "dreamina"
+    return ""
+
+
+async def _expected_account_platform_kind_for_space(space: Any, browser: Any) -> str:
+    """Infer the account platform that belongs to a workspace/project."""
+    if not db or not browser:
+        return ""
+    project_id = int(getattr(browser, "project_id", 0) or 0)
+    if project_id > 0:
+        for code, kind in (("dreamina_workflow", "dreamina"), ("leonardo_workflow", "leonardo")):
+            try:
+                task_type = await db.get_task_type_by_code(code)
+            except Exception:
+                task_type = None
+            if task_type and int(getattr(task_type, "project_id", 0) or 0) == project_id:
+                return kind
+
+    hay = " ".join(
+        [
+            str(getattr(space, "name", "") or ""),
+            str(getattr(browser, "name", "") or ""),
+        ]
+    ).strip().lower()
+    if any(x in hay for x in ("即梦", "dreamina", "jimeng", "capcut")):
+        return "dreamina"
+    if "leonardo" in hay:
+        return "leonardo"
+    return ""
+
+
 async def _ensure_manual_open_has_target_page(pw_ctx: Any, target_url: str) -> str:
     """打开/唤起指纹窗口后，确保窗口内存在目标页或其子页面。
 
@@ -585,6 +623,7 @@ class ImportBindAccountsRequest(BaseModel):
     bind_empty_windows: bool = True
     add_to_task_pool: bool = True
     open_after_bind: bool = True
+    open_account_after_bind: bool = False
     refresh_quota_after_bind: bool = True
     daily_quota: int = Field(default=9999, ge=0, le=100000)
     remaining_quota: int = Field(default=0, ge=0, le=100000)
@@ -592,6 +631,13 @@ class ImportBindAccountsRequest(BaseModel):
     open_browser_only: bool = False
     headless: bool = False
     pure_mode: Optional[bool] = None
+    auto_create_windows: bool = False
+    auto_create_window_max: int = Field(default=10, ge=0, le=100)
+
+
+class BatchDreaminaLogoutRequest(BaseModel):
+    mapping_ids: List[int] = Field(default_factory=list)
+    local_only: bool = False
 
 
 class UpdateAccountRemarkRequest(BaseModel):
@@ -733,6 +779,7 @@ def _normalize_import_platform_url(platform_url: Optional[str], default_url: str
 
 def _parse_batch_account_lines(content: str, platform_url: Optional[str] = None, default_platform_url: str = "https://accounts.google.com/") -> List[Dict[str, Any]]:
     """解析批量账号文本，支持多种分隔符格式：
+    - 邮箱----密码（EFA 可省略）
     - 邮箱——密码——忽略——EFA（中文长横线）
     - 邮箱----密码----忽略----EFA----忽略（四连字符，取第1/2/4字段）
     """
@@ -744,12 +791,12 @@ def _parse_batch_account_lines(content: str, platform_url: Optional[str] = None,
             continue
         # 兼容：四连字符 / 中文长横线 / 双连字符 / 单长破折号 / 空格连字符
         parts = [x.strip() for x in re.split(r"(?:----|——|--|—| - )", ln) if str(x or "").strip()]
-        if len(parts) < 4:
+        if len(parts) < 2:
             continue
         email = str(parts[0] or "").strip()
         password = str(parts[1] or "").strip()
-        efa = str(parts[3] or "").strip()
-        if not email:
+        efa = str(parts[3] or "").strip() if len(parts) >= 4 else ""
+        if not email or not password:
             continue
         out.append(
             {
@@ -2178,7 +2225,7 @@ async def import_space_accounts(space_pk: int, req: ImportAccountsRequest, token
 
     parsed = _parse_batch_account_lines(req.content, req.platform_url)
     if not parsed:
-        raise HTTPException(status_code=400, detail="未解析到有效账号，请检查格式：邮箱——密码——忽略——EFA 或 邮箱----密码----忽略----EFA----忽略")
+        raise HTTPException(status_code=400, detail="未解析到有效账号，请检查格式：邮箱----密码 或 邮箱----密码----忽略----EFA")
 
     # 避免覆盖/重复：按 (platformUrl, platformUserName) 去重
     dedup_map: Dict[str, Dict[str, Any]] = {}
@@ -2240,6 +2287,168 @@ async def import_space_accounts(space_pk: int, req: ImportAccountsRequest, token
     }
 
 
+async def _dreamina_direct_login_for_mapping(
+    mapping_id: int,
+    *,
+    headless: bool = False,
+    pure_mode: Optional[bool] = None,
+) -> Dict[str, Any]:
+    if not db:
+        raise HTTPException(status_code=500, detail="db not initialized")
+
+    ctx_row = await db.get_task_type_window_context(mapping_id)
+    if not ctx_row:
+        raise HTTPException(status_code=404, detail="mapping not found")
+    handler = str(ctx_row.get("create_task_handler") or "").strip().lower()
+    if handler != "dreamina_workflow":
+        raise HTTPException(status_code=400, detail="当前绑定不是 dreamina_workflow")
+
+    window_pk = int(ctx_row.get("window_pk") or 0)
+    vendor = str(ctx_row.get("vendor") or "roxy")
+    base_url = str(ctx_row.get("lan_addr") or "")
+    access_key = ctx_row.get("access_key")
+    space_id = str(ctx_row.get("space_id") or "")
+    window_key = str(ctx_row.get("window_key") or "")
+    if window_pk <= 0 or not base_url or not space_id or not window_key:
+        raise HTTPException(status_code=400, detail="mapping missing window/browser context")
+
+    timeout_seconds = float(ctx_row.get("task_timeout_seconds") or 600)
+    timeout_seconds = max(120.0, min(timeout_seconds, 3600.0))
+    effective_pure = _effective_browser_pure_mode(ctx_row, pure_mode)
+
+    async def _progress_cb(_pct: int, _meta: Optional[Dict[str, Any]] = None) -> None:
+        return
+
+    try:
+        from ..services.jimeng_task_executor import dreamina_admin_direct_login_page  # type: ignore
+
+        result = await dreamina_admin_direct_login_page(
+            _progress_cb,
+            db=db,
+            window_pk=window_pk,
+            browser_vendor=vendor,
+            browser_base_url=base_url,
+            browser_access_key=access_key,
+            space_id=space_id,
+            window_key=window_key,
+            headless=headless,
+            default_target_url=str(ctx_row.get("default_target_url") or "").strip(),
+            pure_mode=effective_pure,
+            timeout_seconds=timeout_seconds,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Dreamina 直接上号失败：{e}")
+
+    access_token = str((result or {}).get("access_token") or "").strip() or None
+    expires = str((result or {}).get("expires") or "").strip() or None
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Dreamina 直接上号失败：未返回 sessionid")
+
+    await db.update_task_type_window(mapping_id=mapping_id, sora_access_token=access_token, sora_access_expires=expires)
+    return result
+
+
+def _extract_window_keys_from_create_response(rsp: Optional[Dict[str, Any]]) -> List[str]:
+    keys: List[str] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key in ("dirId", "dir_id", "windowKey", "window_key"):
+                raw = value.get(key)
+                text = str(raw or "").strip()
+                if text:
+                    keys.append(text)
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(rsp or {})
+    out: List[str] = []
+    seen: Set[str] = set()
+    for key in keys:
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+async def _auto_create_empty_windows_for_binding(
+    *,
+    client: FPBrowserClient,
+    browser: Any,
+    space: Any,
+    space_pk: int,
+    task_code: str,
+    default_platform_url: str,
+    count: int,
+) -> Dict[str, Any]:
+    if not db:
+        raise HTTPException(status_code=500, detail="db not initialized")
+    create_count = max(0, int(count or 0))
+    if create_count <= 0:
+        return {"created_windows": [], "sync_results": []}
+
+    target_url = _normalize_import_platform_url(default_platform_url, default_platform_url)
+    prefix = "Dreamina" if str(task_code or "").strip() == "dreamina_workflow" else "Auto"
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    created_windows: List[Dict[str, Any]] = []
+    created_keys: Set[str] = set()
+
+    for idx in range(create_count):
+        window_name = f"{prefix} auto {stamp}-{idx + 1}"
+        rsp = await client.create_window(
+            vendor=browser.vendor,
+            base_url=browser.lan_addr,
+            access_key=browser.access_key,
+            space_id=space.space_id,
+            window_name=window_name,
+            open_urls=[target_url] if target_url else [],
+        )
+        if _remote_response_code(rsp) != 0:
+            raise RuntimeError(_remote_response_msg(rsp, "fingerprint window create failed"))
+        keys = _extract_window_keys_from_create_response(rsp)
+        for key in keys:
+            created_keys.add(key)
+        created_windows.append(
+            {
+                "window_name": window_name,
+                "window_keys": keys,
+                "message": _remote_response_msg(rsp, "created"),
+            }
+        )
+
+    sync_results: List[Dict[str, Any]] = []
+    for attempt in range(5):
+        if attempt > 0:
+            await asyncio.sleep(0.8 * attempt)
+        remote_windows = await client.list_windows(
+            vendor=browser.vendor,
+            base_url=browser.lan_addr,
+            access_key=browser.access_key,
+            space_id=space.space_id,
+            project_ids=getattr(space, "project_ids", None),
+        )
+        sync_result = await db.upsert_windows(space_pk=space_pk, windows=remote_windows)
+        sync_results.append(sync_result)
+        local_windows = await db.list_windows(space_pk)
+        if created_keys:
+            local_keys = {str(getattr(w, "window_key", "") or "").strip() for w in local_windows}
+            if created_keys.issubset(local_keys):
+                break
+        elif int(sync_result.get("affected") or 0) >= create_count:
+            break
+
+    return {
+        "created_windows": created_windows,
+        "created_window_keys": sorted(created_keys),
+        "sync_results": sync_results,
+    }
+
+
 @router.post("/api/admin/spaces/{space_pk}/accounts/import-bind")
 async def import_bind_space_accounts(space_pk: int, req: ImportBindAccountsRequest, token: str = Depends(verify_admin_token)):
     """Import accounts, bind them to workflow windows, and optionally open windows."""
@@ -2261,10 +2470,15 @@ async def import_bind_space_accounts(space_pk: int, req: ImportBindAccountsReque
     if task_type_id <= 0:
         raise HTTPException(status_code=400, detail="task_type id missing")
 
-    default_platform_url = "https://app.leonardo.ai/" if task_code == "leonardo_workflow" else "https://accounts.google.com/"
+    if task_code == "leonardo_workflow":
+        default_platform_url = "https://app.leonardo.ai/"
+    elif task_code == "dreamina_workflow":
+        default_platform_url = "https://dreamina.capcut.com/"
+    else:
+        default_platform_url = "https://accounts.google.com/"
     parsed = _parse_batch_account_lines(req.content, req.platform_url, default_platform_url)
     if not parsed:
-        raise HTTPException(status_code=400, detail="no valid accounts parsed")
+        raise HTTPException(status_code=400, detail="no valid accounts parsed; expected email----password or email----password----ignore----EFA")
 
     dedup_map: Dict[str, Dict[str, Any]] = {}
     for account in parsed:
@@ -2399,17 +2613,78 @@ async def import_bind_space_accounts(space_pk: int, req: ImportBindAccountsReque
             targets.append({"window": w, "mapping": mappings_by_window.get(wpk), "reason": "empty_window"})
             used_window_pks.add(wpk)
 
+    auto_created_windows: List[Dict[str, Any]] = []
+    auto_create_error = ""
+    auto_create_sync_results: List[Dict[str, Any]] = []
+    effective_auto_create_windows = bool(req.auto_create_windows) or (
+        task_code == "dreamina_workflow" and bool(req.open_account_after_bind)
+    )
+    if effective_auto_create_windows and bool(req.bind_empty_windows) and len(targets) < len(import_accounts):
+        missing_target_count = len(import_accounts) - len(targets)
+        create_count = min(missing_target_count, int(req.auto_create_window_max or 0))
+        if create_count > 0:
+            try:
+                auto_create_result = await _auto_create_empty_windows_for_binding(
+                    client=client,
+                    browser=browser,
+                    space=space,
+                    space_pk=space_pk,
+                    task_code=task_code,
+                    default_platform_url=default_platform_url,
+                    count=create_count,
+                )
+                auto_created_windows = list(auto_create_result.get("created_windows") or [])
+                auto_create_sync_results = list(auto_create_result.get("sync_results") or [])
+
+                windows = await db.list_windows(space_pk)
+                windows_by_pk = {int(getattr(w, "id", 0) or 0): w for w in windows if int(getattr(w, "id", 0) or 0) > 0}
+                mappings = await db.list_task_type_windows(task_type_id)
+                mappings_by_window = {int(m.get("window_pk") or 0): m for m in mappings if int(m.get("window_pk") or 0) > 0}
+                used_window_pks = set()
+                targets = []
+                if req.replace_low_credit:
+                    for m in sorted(mappings, key=lambda row: (_safe_int(row.get("remaining_quota")), _safe_int(row.get("id")))):
+                        wpk = _safe_int(m.get("window_pk"))
+                        if wpk <= 0 or wpk in used_window_pks or wpk not in windows_by_pk:
+                            continue
+                        if not bool(getattr(windows_by_pk[wpk], "enabled", True)):
+                            continue
+                        if _safe_int(m.get("remaining_quota")) < int(req.low_credit_threshold):
+                            targets.append({"window": windows_by_pk[wpk], "mapping": m, "reason": "low_credit"})
+                            used_window_pks.add(wpk)
+                for w in windows:
+                    wpk = int(getattr(w, "id", 0) or 0)
+                    if wpk <= 0 or wpk in used_window_pks:
+                        continue
+                    if not bool(getattr(w, "enabled", True)):
+                        continue
+                    account_id = int(getattr(w, "platform_account_id", 0) or 0)
+                    account_name = str(getattr(w, "platform_account", "") or "").strip()
+                    if account_id > 0 or account_name:
+                        continue
+                    targets.append({"window": w, "mapping": mappings_by_window.get(wpk), "reason": "auto_created_empty_window"})
+                    used_window_pks.add(wpk)
+            except Exception as e:
+                auto_create_error = str(e)
+                logger.warning("auto-create fingerprint windows failed for import-bind: space_pk=%s err=%s", space_pk, e, exc_info=True)
+
     bind_count = min(len(import_accounts), len(targets))
     if bind_count <= 0:
         return {
             "success": False,
-            "message": "No target windows available for binding.",
+            "message": (
+                "No target windows available for binding."
+                + (f" Auto-create failed: {auto_create_error}" if auto_create_error else "")
+            ),
             "parsed": len(parsed_unique),
             "created": len(to_create),
             "bindable": len(import_accounts),
             "missing_accounts": missing_accounts,
             "skipped_bound_accounts": skipped_bound_accounts,
             "create_error": create_error,
+            "auto_created_windows": auto_created_windows,
+            "auto_create_error": auto_create_error,
+            "auto_create_sync_results": auto_create_sync_results,
             "items": [],
         }
 
@@ -2463,13 +2738,20 @@ async def import_bind_space_accounts(space_pk: int, req: ImportBindAccountsReque
 
             if mapping_id > 0 and req.open_after_bind:
                 try:
-                    item["open_result"] = await manual_open_mapping_window(
-                        mapping_id,
-                        headless=bool(req.headless),
-                        pure_mode=req.pure_mode,
-                        browser_only=bool(req.open_browser_only),
-                        token=token,
-                    )
+                    if task_code == "dreamina_workflow" and bool(req.open_account_after_bind):
+                        item["open_result"] = await _dreamina_direct_login_for_mapping(
+                            mapping_id,
+                            headless=bool(req.headless),
+                            pure_mode=req.pure_mode,
+                        )
+                    else:
+                        item["open_result"] = await manual_open_mapping_window(
+                            mapping_id,
+                            headless=bool(req.headless),
+                            pure_mode=req.pure_mode,
+                            browser_only=bool(req.open_browser_only),
+                            token=token,
+                        )
                     opened += 1
                 except Exception as e:
                     item["errors"].append(f"open failed: {e}")
@@ -2495,9 +2777,14 @@ async def import_bind_space_accounts(space_pk: int, req: ImportBindAccountsReque
         items.append(item)
 
     skipped_accounts = len(import_accounts) - bind_count
+    auto_created_count = len(auto_created_windows)
     return {
         "success": bound > 0,
-        "message": f"import-bind done: bound={bound}, opened={opened}, refreshed={refreshed}, skipped_accounts={skipped_accounts}",
+        "message": (
+            f"import-bind done: bound={bound}, opened={opened}, refreshed={refreshed}, "
+            f"auto_created_windows={auto_created_count}, skipped_accounts={skipped_accounts}"
+            + (f", auto_create_error={auto_create_error}" if auto_create_error else "")
+        ),
         "task_type_id": task_type_id,
         "task_type_code": task_code,
         "parsed": len(parsed_unique),
@@ -2511,6 +2798,9 @@ async def import_bind_space_accounts(space_pk: int, req: ImportBindAccountsReque
         "missing_accounts": missing_accounts,
         "skipped_bound_accounts": skipped_bound_accounts,
         "create_error": create_error,
+        "auto_created_windows": auto_created_windows,
+        "auto_create_error": auto_create_error,
+        "auto_create_sync_results": auto_create_sync_results,
         "items": items,
     }
 
@@ -2904,6 +3194,19 @@ async def _mdf_window_account_and_proxy_from_local(
         raise HTTPException(status_code=400, detail=f"本地窗口未绑定账号，无法同步（当前账号：{local_account or '-'}）")
 
     local_proxy_id = int(getattr(target_win, "proxy_id", 0) or 0) if target_win else 0
+
+    if selected is not None:
+        expected_kind = await _expected_account_platform_kind_for_space(space, browser)
+        selected_kind = _account_platform_kind_from_url(str(getattr(selected, "platform_url", "") or ""))
+        if expected_kind and selected_kind != expected_kind:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"account platform mismatch: this space expects {expected_kind}, "
+                    f"but selected account is {selected_kind or 'unknown'} "
+                    f"({str(getattr(selected, 'platform_url', '') or '-')})"
+                ),
+            )
 
     syscfg = await db.get_system_config()
     client = FPBrowserClient()
@@ -4971,6 +5274,33 @@ async def manual_open_mapping_window(
                 await grok_ctx.disconnect_playwright_under_bring_lock()
             except Exception:
                 pass
+    elif handler == "dreamina_workflow":
+        from ..services.jimeng_task_executor import get_or_create_dreamina_session  # type: ignore
+
+        dreamina_ctx = get_or_create_dreamina_session(vendor=vendor, base_url=base_url, access_key=access_key, space_id=space_id, window_key=window_key)
+        dreamina_ctx.browser_headless = headless
+        dreamina_ctx.browser_pure_mode = effective_pure
+        dreamina_ctx.idle_close_disabled = True
+        try:
+            dreamina_ctx._cancel_idle_close()
+        except Exception:
+            pass
+        try:
+            await dreamina_ctx.pw_ctx.open_fingerprint_window_only(
+                args=[] if browser_only else dreamina_ctx.browser_open_args,
+                force_open=dreamina_ctx.browser_force_open,
+                headless=headless,
+                pure_mode=effective_pure,
+            )
+            if not browser_only:
+                final_url = await _ensure_manual_open_has_target_page(dreamina_ctx.pw_ctx, target_url)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"open Dreamina window failed: {e}")
+        finally:
+            try:
+                await dreamina_ctx.disconnect_playwright_under_bring_lock()
+            except Exception:
+                pass
     else:
         from ..services.sora_task_executor import get_or_create_sora_session  # type: ignore
 
@@ -5046,6 +5376,15 @@ async def manual_close_mapping_window(mapping_id: int, token: str = Depends(veri
         veo_ctx.idle_close_disabled = False
         try:
             veo_ctx._schedule_idle_close()
+        except Exception:
+            pass
+    elif handler == "dreamina_workflow":
+        from ..services.jimeng_task_executor import get_or_create_dreamina_session  # type: ignore
+
+        dreamina_ctx = get_or_create_dreamina_session(vendor=vendor, base_url=base_url, access_key=access_key, space_id=space_id, window_key=window_key)
+        dreamina_ctx.idle_close_disabled = False
+        try:
+            dreamina_ctx._schedule_idle_close()
         except Exception:
             pass
     else:
@@ -5154,6 +5493,164 @@ async def clear_mapping_browser_cache(
     }
 
 
+async def _close_dreamina_mapping_window_now(ctx_row: Dict[str, Any], *, headless: bool = False, pure_mode: Optional[bool] = None) -> Dict[str, Any]:
+    if not db:
+        raise HTTPException(status_code=500, detail="db not initialized")
+
+    vendor = str(ctx_row.get("vendor") or "roxy")
+    base_url = str(ctx_row.get("lan_addr") or "")
+    access_key = ctx_row.get("access_key")
+    space_id = str(ctx_row.get("space_id") or "")
+    window_key = str(ctx_row.get("window_key") or "")
+    if not base_url or not space_id or not window_key:
+        raise HTTPException(status_code=400, detail="mapping missing vendor/lan_addr/space_id/window_key")
+
+    from ..services.jimeng_task_executor import get_or_create_dreamina_session  # type: ignore
+
+    effective_pure = _effective_browser_pure_mode(ctx_row, pure_mode)
+    dreamina_ctx = get_or_create_dreamina_session(vendor=vendor, base_url=base_url, access_key=access_key, space_id=space_id, window_key=window_key)
+    dreamina_ctx.browser_headless = headless
+    dreamina_ctx.browser_pure_mode = effective_pure
+    dreamina_ctx.idle_close_disabled = False
+    try:
+        dreamina_ctx._cancel_idle_close()
+    except Exception:
+        pass
+    await dreamina_ctx.close_and_drop()
+    try:
+        await dreamina_ctx.disconnect_playwright_under_bring_lock()
+    except Exception:
+        pass
+    try:
+        await db.update_window_status_by_space_and_key(space_id=space_id, window_key=window_key, window_status=0)
+    except Exception:
+        pass
+    return {"success": True, "window_key": window_key, "closed": True}
+
+
+@router.post("/api/admin/task-type-windows/batch-dreamina-logout")
+async def batch_dreamina_logout_windows(req: BatchDreaminaLogoutRequest, token: str = Depends(verify_admin_token)):
+    if not db:
+        raise HTTPException(status_code=500, detail="db not initialized")
+
+    ids: List[int] = []
+    seen: Set[int] = set()
+    for raw in req.mapping_ids or []:
+        mid = int(raw or 0)
+        if mid > 0 and mid not in seen:
+            seen.add(mid)
+            ids.append(mid)
+    if not ids:
+        raise HTTPException(status_code=400, detail="mapping_ids is required")
+    if len(ids) > 1000:
+        raise HTTPException(status_code=400, detail="单次最多处理 1000 个窗口")
+
+    def _err(e: Exception) -> str:
+        if isinstance(e, HTTPException):
+            return str(e.detail or "")
+        return str(e or "")
+
+    items: List[Dict[str, Any]] = []
+    ok = 0
+    partial = 0
+    failed = 0
+    for mapping_id in ids:
+        item: Dict[str, Any] = {
+            "mapping_id": mapping_id,
+            "status": "pending",
+            "steps": [],
+            "errors": [],
+        }
+        ctx_row = await db.get_task_type_window_context(mapping_id)
+        if not ctx_row:
+            item["status"] = "failed"
+            item["errors"].append("mapping not found")
+            items.append(item)
+            failed += 1
+            continue
+        handler = str(ctx_row.get("create_task_handler") or "").strip().lower()
+        if handler != "dreamina_workflow":
+            item["status"] = "failed"
+            item["errors"].append("not dreamina_workflow")
+            items.append(item)
+            failed += 1
+            continue
+
+        space_pk = int(ctx_row.get("space_pk") or 0)
+        window_key = str(ctx_row.get("window_key") or "").strip()
+        item["window_pk"] = int(ctx_row.get("window_pk") or 0)
+        item["window_key"] = window_key
+        item["window_name"] = str(ctx_row.get("window_name") or "").strip()
+
+        try:
+            item["close_result"] = await _close_dreamina_mapping_window_now(ctx_row)
+            item["steps"].append("closed")
+        except Exception as e:
+            item["errors"].append(f"close failed: {_err(e)}")
+
+        try:
+            item["cache_result"] = await clear_mapping_browser_cache(
+                mapping_id,
+                local_only=bool(req.local_only),
+                token=token,
+            )
+            item["steps"].append("cache_cleared")
+        except Exception as e:
+            item["errors"].append(f"clear cache failed: {_err(e)}")
+
+        try:
+            await db.update_task_type_window(
+                mapping_id=mapping_id,
+                sora_access_token="",
+                sora_access_expires="",
+                remaining_quota=0,
+                sora_remaining_count=0,
+                sora_purchased_remaining_count=0,
+                sora_rate_limit_reached=False,
+                sora_access_resets_in_seconds=0,
+                cooldown_until="",
+                sora_plan_title="",
+                sora_subscription_end="",
+            )
+            item["steps"].append("local_session_cleared")
+        except Exception as e:
+            item["errors"].append(f"clear local session failed: {_err(e)}")
+
+        try:
+            if space_pk <= 0 or not window_key:
+                raise HTTPException(status_code=400, detail="mapping missing space_pk/window_key")
+            item["unbind_result"] = await _mdf_window_account_and_proxy_from_local(
+                space_pk=space_pk,
+                window_key=window_key,
+                selected_account=None,
+                clear_account=True,
+                require_local_account=False,
+            )
+            item["steps"].append("account_unbound")
+        except Exception as e:
+            item["errors"].append(f"unbind account failed: {_err(e)}")
+
+        if not item["errors"]:
+            item["status"] = "ok"
+            ok += 1
+        elif item["steps"]:
+            item["status"] = "partial"
+            partial += 1
+        else:
+            item["status"] = "failed"
+            failed += 1
+        items.append(item)
+
+    return {
+        "success": ok > 0 or partial > 0,
+        "message": f"Dreamina batch logout done: ok={ok}, partial={partial}, failed={failed}",
+        "ok": ok,
+        "partial": partial,
+        "failed": failed,
+        "items": items,
+    }
+
+
 @router.post("/api/admin/task-type-windows/{mapping_id}/open-account")
 async def open_account_mapping_window(
     mapping_id: int,
@@ -5231,27 +5728,10 @@ async def open_account_mapping_window(
                 pure_mode=effective_pure,
             )
         elif handler == "dreamina_workflow":
-            from ..services.jimeng_task_executor import dreamina_admin_open_connect_page  # type: ignore
-
-            try:
-                gl_ms = int(float(ctx_row.get("task_timeout_seconds") or 120) * 1000)
-            except Exception:
-                gl_ms = 120_000
-            gl_ms = max(45_000, min(gl_ms, 240_000))
-            result = await dreamina_admin_open_connect_page(
-                _progress_cb,
-                db=db,
-                window_pk=window_pk,
-                browser_vendor=vendor,
-                browser_base_url=base_url,
-                browser_access_key=access_key,
-                space_id=space_id,
-                window_key=window_key,
+            result = await _dreamina_direct_login_for_mapping(
+                mapping_id,
                 headless=headless,
-                default_target_url=str(ctx_row.get("default_target_url") or "").strip(),
                 pure_mode=effective_pure,
-                timeout_seconds=timeout_seconds,
-                google_login_timeout_ms=gl_ms,
             )
         elif handler == "grok_workflow":
             from ..services.grok_workflow_executor import grok_admin_open_connect_page  # type: ignore

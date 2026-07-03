@@ -95,6 +95,7 @@ class CreateVideoRequest(BaseModel):
 OPENAI_COMPAT_VIDEO_MODELS = (
     "seedance-2",
     "seedance-2-fast",
+    "seedance-2-mini",
     *LEONARDO_PUBLIC_MODEL_ALIASES.keys(),
     "nana-banana-2",
     "nana-banana-pro",
@@ -612,7 +613,7 @@ def _normalize_video_task_payload(payload: Dict[str, Any]) -> tuple[str, Dict[st
     payload = dict(payload or {})
     model = str(payload.get("model") or "").strip()
     model_key = model.lower()
-    if model_key in {"seedance-2", "seedance-2-fast"}:
+    if model_key in {"seedance-2", "seedance-2-fast", "seedance-2-mini"}:
         task_type_code = "dreamina_workflow"
     elif model_key in LEONARDO_PUBLIC_MODEL_ALIASES:
         task_type_code = "leonardo_workflow"

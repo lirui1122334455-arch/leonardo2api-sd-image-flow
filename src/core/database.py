@@ -4741,6 +4741,7 @@ class Database:
             return None
         pool_limit = max(1, int(browser_pool_limit or 100))
         quota_floor = max(0, int(remaining_quota_exclusive_floor))
+        prefer_low_quota = 1 if code == "dreamina_workflow" else 0
 
         _lock = self._get_write_lock()
         for _attempt in range(5):
@@ -4819,8 +4820,10 @@ class Database:
                               ORDER BY
                                 p.window_status DESC,
                                 p.consecutive_errors ASC,
-                                p.mapping_updated_at ASC,
-                                p.remaining_quota DESC
+                                CASE WHEN ? = 1 THEN p.remaining_quota END ASC,
+                                CASE WHEN ? = 0 THEN p.mapping_updated_at END ASC,
+                                CASE WHEN ? = 0 THEN p.remaining_quota END DESC,
+                                p.mapping_updated_at ASC
                             ) AS browser_pool_rank
                           FROM pool_source p
                         )
@@ -4831,10 +4834,28 @@ class Database:
                         FROM ranked
                         WHERE browser_pool_rank <= effective_pool_limit
                           AND is_runnable = 1
-                        ORDER BY consecutive_errors ASC, mapping_updated_at ASC,remaining_quota DESC
+                        ORDER BY
+                          consecutive_errors ASC,
+                          CASE WHEN ? = 1 THEN remaining_quota END ASC,
+                          CASE WHEN ? = 0 THEN mapping_updated_at END ASC,
+                          CASE WHEN ? = 0 THEN remaining_quota END DESC,
+                          mapping_updated_at ASC
                         LIMIT 1
                         """,
-                        (pool_limit, code, quota_floor, credit_threthold, quota_floor, credit_threthold),
+                        (
+                            pool_limit,
+                            code,
+                            quota_floor,
+                            credit_threthold,
+                            quota_floor,
+                            credit_threthold,
+                            prefer_low_quota,
+                            prefer_low_quota,
+                            prefer_low_quota,
+                            prefer_low_quota,
+                            prefer_low_quota,
+                            prefer_low_quota,
+                        ),
                     )
                     #ORDER BY consecutive_errors ASC, mapping_updated_at ASC, remaining_quota DESC
                     picked = await cur.fetchone()
@@ -4945,6 +4966,7 @@ class Database:
         if not code or not ids:
             return None
         quota_floor = max(0, int(remaining_quota_exclusive_floor))
+        prefer_low_quota = 1 if code == "dreamina_workflow" else 0
         placeholders = ",".join("?" for _ in ids)
 
         _lock = self._get_write_lock()
@@ -4989,10 +5011,15 @@ class Database:
                             (m.remaining_quota >= ?)
                             OR (m.remaining_quota >= ? AND m.cooldown_until IS NOT NULL AND m.cooldown_until <= datetime('now','localtime', '+5 minutes'))
                           )
-                        ORDER BY m.consecutive_errors ASC, m.updated_at ASC, m.remaining_quota DESC
+                        ORDER BY
+                          m.consecutive_errors ASC,
+                          CASE WHEN ? = 1 THEN m.remaining_quota END ASC,
+                          CASE WHEN ? = 0 THEN m.updated_at END ASC,
+                          CASE WHEN ? = 0 THEN m.remaining_quota END DESC,
+                          m.updated_at ASC
                         LIMIT 1
                         """,
-                        (code, *ids, quota_floor,credit_threthold),
+                        (code, *ids, quota_floor, credit_threthold, prefer_low_quota, prefer_low_quota, prefer_low_quota),
                     )
                     picked = await cur.fetchone()
                     if not picked:
@@ -5134,6 +5161,7 @@ class Database:
             return []
         pool_limit = max(1, int(browser_pool_limit or 100))
         quota_floor = max(0, int(remaining_quota_exclusive_floor))
+        prefer_low_quota = 1 if code == "dreamina_workflow" else 0
         async with self._read_conn() as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
@@ -5201,8 +5229,10 @@ class Database:
                       ORDER BY
                         p.window_status DESC,
                         p.consecutive_errors ASC,
-                        p.mapping_updated_at ASC,
-                        p.remaining_quota DESC
+                        CASE WHEN ? = 1 THEN p.remaining_quota END ASC,
+                        CASE WHEN ? = 0 THEN p.mapping_updated_at END ASC,
+                        CASE WHEN ? = 0 THEN p.remaining_quota END DESC,
+                        p.mapping_updated_at ASC
                     ) AS browser_pool_rank
                   FROM pool_source p
                 )
@@ -5210,9 +5240,27 @@ class Database:
                 FROM ranked
                 WHERE browser_pool_rank <= effective_pool_limit
                   AND is_runnable = 1
-                ORDER BY consecutive_errors ASC, mapping_updated_at ASC, remaining_quota DESC
+                ORDER BY
+                  consecutive_errors ASC,
+                  CASE WHEN ? = 1 THEN remaining_quota END ASC,
+                  CASE WHEN ? = 0 THEN mapping_updated_at END ASC,
+                  CASE WHEN ? = 0 THEN remaining_quota END DESC,
+                  mapping_updated_at ASC
                 """,
-                (pool_limit, code, quota_floor, credit_threthold, quota_floor,credit_threthold),
+                (
+                    pool_limit,
+                    code,
+                    quota_floor,
+                    credit_threthold,
+                    quota_floor,
+                    credit_threthold,
+                    prefer_low_quota,
+                    prefer_low_quota,
+                    prefer_low_quota,
+                    prefer_low_quota,
+                    prefer_low_quota,
+                    prefer_low_quota,
+                ),
             )
             rows = await cur.fetchall()
             return [int(r["mapping_id"]) for r in rows]

@@ -84,7 +84,7 @@
                 <input class="form-control mono" id="firstImageUrl" placeholder="https://..." />
                 <div class="text-muted small">后端不再接收图片二进制，只接收网络链接（由 handler 自行处理）。</div>
               </div>
-              <div class="mb-3">
+              <div class="mb-3" id="imageAspectRatioWrap">
                 <label class="form-label">图片比例 aspect_ratio（可选）</label>
                 <select class="form-select" id="imageAspectRatio">
                   <option value="">Auto</option>
@@ -156,7 +156,82 @@
                   <label class="form-check-label" for="leonardoMotionHasAudio">motion_has_audio</label>
                 </div>
               </div>
-              <div class="mb-3">
+              <div class="mb-3" id="dreaminaModelWrap" style="display: none;">
+                <label class="form-label">Dreamina Seedance 参数</label>
+                <div class="row g-2 mt-1">
+                  <div class="col-12 col-md-3">
+                    <label class="form-label">model</label>
+                    <select class="form-select" id="dreaminaModel">
+                      <option value="seedance-2-mini">Dreamina Seedance 2.0 Mini</option>
+                      <option value="seedance-2-fast" selected>Dreamina Seedance 2.0 Fast</option>
+                      <option value="seedance-2">Dreamina Seedance 2.0</option>
+                    </select>
+                  </div>
+                  <div class="col-12 col-md-3">
+                    <label class="form-label">resolution</label>
+                    <select class="form-select" id="dreaminaResolution">
+                      <option value="720p" selected>720p</option>
+                    </select>
+                  </div>
+                  <div class="col-12 col-md-3">
+                    <label class="form-label">aspect_ratio</label>
+                    <select class="form-select" id="dreaminaAspect">
+                      <option value="16:9" selected>16:9</option>
+                      <option value="9:16">9:16</option>
+                      <option value="1:1">1:1</option>
+                      <option value="4:3">4:3</option>
+                      <option value="3:4">3:4</option>
+                      <option value="21:9">21:9</option>
+                    </select>
+                  </div>
+                  <div class="col-12 col-md-3">
+                    <label class="form-label">duration</label>
+                    <select class="form-select" id="dreaminaDuration">
+                      <option value="4">4s</option>
+                      <option value="5">5s</option>
+                      <option value="6">6s</option>
+                      <option value="7">7s</option>
+                      <option value="8">8s</option>
+                      <option value="9">9s</option>
+                      <option value="10">10s</option>
+                      <option value="11">11s</option>
+                      <option value="12">12s</option>
+                      <option value="13">13s</option>
+                      <option value="14">14s</option>
+                      <option value="15" selected>15s</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="text-muted small mt-1">即梦视频接口当前读取 model/model_name、resolution、aspect_ratio，duration 支持 4-15 秒。</div>
+                <div class="row g-2 mt-2">
+                  <div class="col-12 col-md-6">
+                    <label class="form-label">function_mode</label>
+                    <select class="form-select" id="dreaminaFunctionMode">
+                      <option value="omni_reference" selected>Omni reference</option>
+                      <option value="first_last_frames">First and last frames</option>
+                    </select>
+                  </div>
+                  <div class="col-12 col-md-6 d-flex align-items-end">
+                    <div class="form-check mb-2">
+                      <input class="form-check-input" type="checkbox" id="dreaminaDryRun" />
+                      <label class="form-check-label" for="dreaminaDryRun">dry_run（不提交生成）</label>
+                    </div>
+                  </div>
+                </div>
+                <div class="mt-2">
+                  <label class="form-label">Dreamina reference images（最多 9 行，https 或本机路径）</label>
+                  <textarea class="form-control mono" id="dreaminaReferenceImageUrls" rows="3" placeholder="https://...&#10;C:\Users\Administrator\Desktop\ceshisucai\image.jpg"></textarea>
+                </div>
+                <div class="mt-2">
+                  <label class="form-label">Dreamina reference videos（最多 3 行，vid|秒 / url|秒 或 JSON）</label>
+                  <textarea class="form-control mono" id="dreaminaReferenceVideos" rows="3" placeholder="https://.../video.mp4|5&#10;v0d...|5&#10;{&quot;url&quot;:&quot;https://.../video.mp4&quot;,&quot;duration&quot;:5}"></textarea>
+                </div>
+                <div class="mt-2">
+                  <label class="form-label">Dreamina reference audios（最多 3 行，vid|秒 / url|秒 或 JSON，总时长 2-15 秒）</label>
+                  <textarea class="form-control mono" id="dreaminaReferenceAudios" rows="3" placeholder="https://.../audio.mp3|4&#10;v0d...|4&#10;{&quot;url&quot;:&quot;https://.../audio.mp3&quot;,&quot;duration&quot;:4}"></textarea>
+                </div>
+              </div>
+              <div class="mb-3" id="imageSizeWrap">
                 <label class="form-label">GPT image2 size（可选）</label>
                 <input class="form-control mono" id="imageSize" list="imageSizeOptions" placeholder="1536x1024" />
                 <datalist id="imageSizeOptions">
@@ -177,12 +252,12 @@
                 <label class="form-check-label" for="dreaminaImageUploadWorkflow">Dreamina 单图上传保存（workflow_kind=image_upload）</label>
                 <div class="text-muted small">勾选后会把上面的图片链接作为 <span class="mono">image_url</span>，并在 payload 中加入 <span class="mono">workflow_kind: "image_upload"</span>。</div>
               </div>
-              <div class="mb-3">
+              <div class="mb-3" id="durationWrap">
                 <label class="form-label">时长 duration（可选）</label>
                 <input class="form-control mono" id="duration" placeholder="5" />
                 <div class="text-muted small">输入为1的时候生成图片</div>
               </div>
-              <div class="mb-3">
+              <div class="mb-3" id="imageResolutionWrap">
                 <label class="form-label">图片输出分辨率（可选）</label>
                 <select class="form-select" id="imageResolution">
                   <option value="1k">1K（默认）</option>
@@ -261,6 +336,15 @@
         testLeonardoReferenceVideoUrl: `${LS_PREFIX}test.leonardo_reference_video_url`,
         testLeonardoReferenceAudioUrl: `${LS_PREFIX}test.leonardo_reference_audio_url`,
         testLeonardoMotionHasAudio: `${LS_PREFIX}test.leonardo_motion_has_audio`,
+        testDreaminaModel: `${LS_PREFIX}test.dreamina_model`,
+        testDreaminaResolution: `${LS_PREFIX}test.dreamina_resolution`,
+        testDreaminaAspect: `${LS_PREFIX}test.dreamina_aspect`,
+        testDreaminaDuration: `${LS_PREFIX}test.dreamina_duration`,
+        testDreaminaFunctionMode: `${LS_PREFIX}test.dreamina_function_mode`,
+        testDreaminaReferenceImageUrls: `${LS_PREFIX}test.dreamina_reference_image_urls`,
+        testDreaminaReferenceVideos: `${LS_PREFIX}test.dreamina_reference_videos`,
+        testDreaminaReferenceAudios: `${LS_PREFIX}test.dreamina_reference_audios`,
+        testDreaminaDryRun: `${LS_PREFIX}test.dreamina_dry_run`,
         testImageResolution: `${LS_PREFIX}test.image_resolution`,
         testImageAspectRatio: `${LS_PREFIX}test.image_aspect_ratio`,
         testImageSize: `${LS_PREFIX}test.image_size`,
@@ -293,6 +377,19 @@
         duration: "8",
       };
 
+      const DREAMINA_TEST_DEFAULTS = {
+        model: "seedance-2-fast",
+        resolution: "720p",
+        aspectRatio: "16:9",
+        duration: "15",
+      };
+
+      const DREAMINA_RESOLUTIONS_BY_MODEL = {
+        "seedance-2-mini": ["720p"],
+        "seedance-2-fast": ["720p"],
+        "seedance-2": ["720p", "1080p", "4k"],
+      };
+
       function isGptType(typeCode) {
         const t = taskTypeByCode.get(typeCode);
         return typeCode === "gpt_workflow" || String(t?.create_task_handler || "").trim() === "gpt_workflow";
@@ -301,6 +398,11 @@
       function isLeonardoType(typeCode) {
         const t = taskTypeByCode.get(typeCode);
         return typeCode === "leonardo_workflow" || String(t?.create_task_handler || "").trim() === "leonardo_workflow";
+      }
+
+      function isDreaminaType(typeCode) {
+        const t = taskTypeByCode.get(typeCode);
+        return typeCode === "dreamina_workflow" || String(t?.create_task_handler || "").trim() === "dreamina_workflow";
       }
 
       function setSelectValueIfEmpty(id, value) {
@@ -320,6 +422,30 @@
           durationEl.value = LEONARDO_TEST_DEFAULTS.duration;
           lsSet(LS_KEYS.testDuration, LEONARDO_TEST_DEFAULTS.duration);
         }
+      }
+
+      function applyDreaminaDefaultsIfEmpty() {
+        setSelectValueIfEmpty("dreaminaModel", DREAMINA_TEST_DEFAULTS.model);
+        syncDreaminaResolutionOptions();
+        setSelectValueIfEmpty("dreaminaResolution", DREAMINA_TEST_DEFAULTS.resolution);
+        setSelectValueIfEmpty("dreaminaAspect", DREAMINA_TEST_DEFAULTS.aspectRatio);
+        setSelectValueIfEmpty("dreaminaDuration", DREAMINA_TEST_DEFAULTS.duration);
+      }
+
+      function getDreaminaResolutionOptions(model) {
+        return DREAMINA_RESOLUTIONS_BY_MODEL[model] || DREAMINA_RESOLUTIONS_BY_MODEL[DREAMINA_TEST_DEFAULTS.model];
+      }
+
+      function syncDreaminaResolutionOptions() {
+        const modelEl = document.getElementById("dreaminaModel");
+        const resolutionEl = document.getElementById("dreaminaResolution");
+        if (!resolutionEl) return;
+        const allowed = getDreaminaResolutionOptions(modelEl?.value || DREAMINA_TEST_DEFAULTS.model);
+        const current = (resolutionEl.value || "").trim().toLowerCase();
+        resolutionEl.innerHTML = allowed.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("");
+        const nextValue = allowed.includes(current) ? current : allowed[0];
+        resolutionEl.value = nextValue;
+        lsSet(LS_KEYS.testDreaminaResolution, nextValue);
       }
 
       const LEONARDO_SIZE_TABLE = {
@@ -386,6 +512,26 @@
         return String(value || "").split(/\r?\n|,/).map(x => x.trim()).filter(Boolean);
       }
 
+      function parseDreaminaMediaLines(value, kind) {
+        return String(value || "").split(/\r?\n/).map(x => x.trim()).filter(Boolean).map((line) => {
+          if (line.startsWith("{")) {
+            const obj = JSON.parse(line);
+            if (!obj || typeof obj !== "object") throw new Error(`Dreamina ${kind} JSON 必须是对象`);
+            return obj;
+          }
+          const parts = line.split("|").map(x => x.trim());
+          const idOrUrl = parts[0] || "";
+          const duration = Number(parts[1] || "");
+          if (!idOrUrl) throw new Error(`Dreamina ${kind} 缺少 vid/url`);
+          if (!Number.isFinite(duration) || duration <= 0) throw new Error(`Dreamina ${kind} 缺少有效时长`);
+          const item = { duration };
+          if (/^[a-z][a-z0-9+.-]*:\/\//i.test(idOrUrl)) item.url = idOrUrl;
+          else item.vid = idOrUrl;
+          if (parts[2]) item.name = parts[2];
+          return item;
+        });
+      }
+
       function collectTaskUrls(d) {
         const result = d?.result || {};
         const meta = d?.metadata || result.metadata || {};
@@ -437,13 +583,25 @@
       function updateTypeHints() {
         const type = document.getElementById("taskType")?.value || "";
         const isLeonardo = isLeonardoType(type);
+        const isDreamina = isDreaminaType(type);
         const videoModelWrap = document.getElementById("videoModelWrap");
         if (videoModelWrap) videoModelWrap.style.display = type === "veo_workflow" ? "" : "none";
         const leonardoModelWrap = document.getElementById("leonardoModelWrap");
         if (leonardoModelWrap) leonardoModelWrap.style.display = isLeonardo ? "" : "none";
+        const dreaminaModelWrap = document.getElementById("dreaminaModelWrap");
+        if (dreaminaModelWrap) dreaminaModelWrap.style.display = isDreamina ? "" : "none";
+        const imageAspectRatioWrap = document.getElementById("imageAspectRatioWrap");
+        if (imageAspectRatioWrap) imageAspectRatioWrap.style.display = isDreamina ? "none" : "";
+        const imageSizeWrap = document.getElementById("imageSizeWrap");
+        if (imageSizeWrap) imageSizeWrap.style.display = isDreamina ? "none" : "";
+        const imageResolutionWrap = document.getElementById("imageResolutionWrap");
+        if (imageResolutionWrap) imageResolutionWrap.style.display = isDreamina ? "none" : "";
+        const durationWrap = document.getElementById("durationWrap");
+        if (durationWrap) durationWrap.style.display = isDreamina ? "none" : "";
         const durationEl = document.getElementById("duration");
-        if (durationEl) durationEl.placeholder = isGptType(type) ? "GPT image2 auto uses 1" : (isLeonardo ? "8" : "5");
+        if (durationEl) durationEl.placeholder = isGptType(type) ? "GPT image2 auto uses 1" : (isLeonardo ? "8" : (isDreamina ? "4-15" : "5"));
         if (isLeonardo) applyLeonardoDefaultsIfEmpty();
+        if (isDreamina) applyDreaminaDefaultsIfEmpty();
         updateLeonardoSizeOptions();
       }
 
@@ -616,8 +774,6 @@
           const allowedImageRatios = new Set(["1:1", "3:2", "2:3", "3:4", "9:16", "4:3", "16:9"]);
           const imageAspectRatio = allowedImageRatios.has(imageAspectRatioRaw) ? imageAspectRatioRaw : "";
           const imageSize = (document.getElementById("imageSize")?.value || "").trim();
-          payload.resolution = imageResolution;
-          payload.size_tier = imageResolution.toUpperCase();
           if (isGptType(type)) {
             payload.duration = 1;
             payload.workflow_kind = "image";
@@ -625,11 +781,53 @@
             payload.model_code = "gpt-image-2";
             payload.image_model_name = "gpt-image-2";
             payload.gpt_image2_model = payload.model;
+            payload.resolution = imageResolution;
+            payload.size_tier = imageResolution.toUpperCase();
             if (imageAspectRatio) {
               payload.aspect_ratio = imageAspectRatio;
               payload.ratio = imageAspectRatio;
             }
             if (imageSize) payload.size = imageSize;
+          }
+          if (isDreaminaType(type)) {
+            const dreaminaModel = (document.getElementById("dreaminaModel")?.value || DREAMINA_TEST_DEFAULTS.model).trim();
+            const dreaminaResolutionRaw = (document.getElementById("dreaminaResolution")?.value || DREAMINA_TEST_DEFAULTS.resolution).trim().toLowerCase();
+            const allowedDreaminaResolutions = getDreaminaResolutionOptions(dreaminaModel);
+            const dreaminaResolution = allowedDreaminaResolutions.includes(dreaminaResolutionRaw) ? dreaminaResolutionRaw : allowedDreaminaResolutions[0];
+            const dreaminaAspectRaw = (document.getElementById("dreaminaAspect")?.value || DREAMINA_TEST_DEFAULTS.aspectRatio).trim();
+            const allowedDreaminaRatios = new Set(["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"]);
+            const dreaminaAspect = allowedDreaminaRatios.has(dreaminaAspectRaw) ? dreaminaAspectRaw : DREAMINA_TEST_DEFAULTS.aspectRatio;
+            const dreaminaDurationRaw = (document.getElementById("dreaminaDuration")?.value || DREAMINA_TEST_DEFAULTS.duration).trim();
+            const dreaminaDurationNumber = Number(dreaminaDurationRaw);
+            const dreaminaDuration = Number.isFinite(dreaminaDurationNumber) && dreaminaDurationNumber >= 4 && dreaminaDurationNumber <= 15
+              ? Math.floor(dreaminaDurationNumber)
+              : Number(DREAMINA_TEST_DEFAULTS.duration);
+            const dreaminaFunctionMode = (document.getElementById("dreaminaFunctionMode")?.value || "omni_reference").trim();
+            const dreaminaRefImages = splitLines(document.getElementById("dreaminaReferenceImageUrls")?.value || "");
+            const dreaminaRefVideos = parseDreaminaMediaLines(document.getElementById("dreaminaReferenceVideos")?.value || "", "video");
+            const dreaminaRefAudios = parseDreaminaMediaLines(document.getElementById("dreaminaReferenceAudios")?.value || "", "audio");
+            const dreaminaAudioSeconds = dreaminaRefAudios.reduce((sum, x) => sum + Number(x.duration || x.duration_seconds || 0), 0);
+            const dreaminaVideoSeconds = dreaminaRefVideos.reduce((sum, x) => sum + Number(x.duration || x.duration_seconds || 0), 0);
+            if (dreaminaRefImages.length > 9) throw new Error("Dreamina reference images 最多 9 张");
+            if (dreaminaRefVideos.length > 3) throw new Error("Dreamina reference videos 最多 3 个");
+            if (dreaminaRefAudios.length > 3) throw new Error("Dreamina reference audios 最多 3 个");
+            if (dreaminaVideoSeconds > 15) throw new Error("Dreamina reference videos 总时长不能超过 15 秒");
+            if (dreaminaRefAudios.length && (dreaminaAudioSeconds < 2 || dreaminaAudioSeconds > 15)) throw new Error("Dreamina reference audios 总时长必须 2-15 秒");
+            if (dreaminaFunctionMode === "first_last_frames" && (dreaminaRefVideos.length || dreaminaRefAudios.length || dreaminaRefImages.length > 2)) {
+              throw new Error("Dreamina 首尾帧只支持最多 2 张图片");
+            }
+            payload.model = dreaminaModel;
+            payload.model_name = dreaminaModel;
+            payload.resolution = dreaminaResolution;
+            payload.quality_resolution = dreaminaResolution;
+            payload.aspect_ratio = dreaminaAspect;
+            payload.ratio = dreaminaAspect;
+            payload.duration = dreaminaDuration;
+            payload.function_mode = dreaminaFunctionMode === "first_last_frames" ? "first_last_frames" : "omni_reference";
+            if (dreaminaRefImages.length) payload.images = dreaminaRefImages;
+            if (dreaminaRefVideos.length) payload.videos = dreaminaRefVideos;
+            if (dreaminaRefAudios.length) payload.audios = dreaminaRefAudios;
+            if (document.getElementById("dreaminaDryRun")?.checked === true) payload.dry_run = true;
           }
           if (isLeonardoType(type)) {
             const leonardoModel = (document.getElementById("leonardoModel")?.value || "seedance-2.0-fast").trim();
@@ -790,6 +988,29 @@
           el.addEventListener(eventName, (e) => lsSet(key, e.target.value || ""));
           return el;
         };
+        const dreaminaModelEl = bindValueCache("dreaminaModel", LS_KEYS.testDreaminaModel, "change");
+        bindValueCache("dreaminaResolution", LS_KEYS.testDreaminaResolution, "change");
+        syncDreaminaResolutionOptions();
+        if (dreaminaModelEl) {
+          dreaminaModelEl.addEventListener("change", () => {
+            syncDreaminaResolutionOptions();
+            lsSet(LS_KEYS.testDreaminaResolution, document.getElementById("dreaminaResolution")?.value || DREAMINA_TEST_DEFAULTS.resolution);
+          });
+        }
+        bindValueCache("dreaminaAspect", LS_KEYS.testDreaminaAspect, "change");
+        bindValueCache("dreaminaDuration", LS_KEYS.testDreaminaDuration, "change");
+        bindValueCache("dreaminaFunctionMode", LS_KEYS.testDreaminaFunctionMode, "change");
+        bindValueCache("dreaminaReferenceImageUrls", LS_KEYS.testDreaminaReferenceImageUrls);
+        bindValueCache("dreaminaReferenceVideos", LS_KEYS.testDreaminaReferenceVideos);
+        bindValueCache("dreaminaReferenceAudios", LS_KEYS.testDreaminaReferenceAudios);
+        const dreaminaDryRunEl = document.getElementById("dreaminaDryRun");
+        if (dreaminaDryRunEl) {
+          dreaminaDryRunEl.checked = (lsGet(LS_KEYS.testDreaminaDryRun) || "") === "1";
+          dreaminaDryRunEl.addEventListener("change", (e) => {
+            if (e.target.checked) lsSet(LS_KEYS.testDreaminaDryRun, "1");
+            else lsDel(LS_KEYS.testDreaminaDryRun);
+          });
+        }
         bindValueCache("leonardoModel", LS_KEYS.testLeonardoModel, "change");
         const leonardoResolutionEl = bindValueCache("leonardoResolution", LS_KEYS.testLeonardoResolution, "change");
         const leonardoAspectEl = bindValueCache("leonardoAspect", LS_KEYS.testLeonardoAspect, "change");

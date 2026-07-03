@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from ..core.database import Database
 from ..core.logger import logger
@@ -155,6 +155,9 @@ from .jimeng_task_executor import (
     dreamina_workflow,
     _DREAMINA_MIN_CREDIT,
     _DREAMINA_GIFT_CREDIT,
+    _dreamina_resolve_model,
+    _dreamina_is_seedance20_fast,
+    _dreamina_is_seedance20_mini,
 )
 from .gpt_task_executor import gpt_workflow, refresh_gpt_balance_via_extension, DEFAULT_GPT_TARGET
 from .leonardo_task_executor import DEFAULT_LEONARDO_TARGET, leonardo_workflow
@@ -195,9 +198,60 @@ class QueuedTask:
     is_dedicated_window: bool = False
     allow_account_switch: bool = True
 
+
+def _truthy_payload_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    s = str(value or "").strip().lower()
+    return s in {"1", "true", "yes", "y", "on"}
+
+
+def _is_no_submit_payload(payload: Optional[Dict[str, Any]]) -> bool:
+    p = payload or {}
+    return any(
+        _truthy_payload_flag(p.get(key))
+        for key in ("dry_run", "dryRun", "skip_submit", "skipSubmit", "preview_only", "previewOnly")
+    )
+
+
+_DREAMINA_MIN_DURATION_SECONDS = 4
+_DREAMINA_MAX_DURATION_SECONDS = 15
+_DREAMINA_COST_PER_SECOND_MINI = 31
+_DREAMINA_COST_PER_SECOND_FAST = 35
+_DREAMINA_COST_PER_SECOND_STANDARD = 43
+_DREAMINA_MIN_RUN_CREDIT = _DREAMINA_MIN_DURATION_SECONDS * _DREAMINA_COST_PER_SECOND_MINI
+
+
+def _dreamina_estimated_credit_cost(payload: Optional[Dict[str, Any]]) -> int:
+    if payload is None:
+        return _DREAMINA_MIN_RUN_CREDIT
+    p = payload or {}
+    raw_duration = p.get("duration")
+    if raw_duration is None or str(raw_duration).strip() == "":
+        seconds = _DREAMINA_MAX_DURATION_SECONDS
+    else:
+        try:
+            seconds = int(float(str(raw_duration).strip()))
+        except (TypeError, ValueError):
+            seconds = _DREAMINA_MAX_DURATION_SECONDS
+    seconds = max(_DREAMINA_MIN_DURATION_SECONDS, min(_DREAMINA_MAX_DURATION_SECONDS, seconds))
+
+    model = _dreamina_resolve_model(p, has_image=False)
+    raw_model = str(p.get("model_name") or p.get("model") or model or "").strip().lower()
+    if _dreamina_is_seedance20_mini(model) or "mini" in raw_model:
+        unit_cost = _DREAMINA_COST_PER_SECOND_MINI
+    elif _dreamina_is_seedance20_fast(model) or "fast" in raw_model:
+        unit_cost = _DREAMINA_COST_PER_SECOND_FAST
+    else:
+        unit_cost = _DREAMINA_COST_PER_SECOND_STANDARD
+    return seconds * unit_cost
+
+
 def _remaining_quota_exclusive_floor_for_pick(
     task_type_code: str, payload: Optional[Dict[str, Any]]
-) -> int:
+) -> Tuple[int, int]:
     credit_threthold = 1;
     """与 pick 时 remaining_quota >= floor 及预扣额度对齐（见 _consume_quota_after_window_pick）。"""
     code = (task_type_code or "").strip()
@@ -214,8 +268,10 @@ def _remaining_quota_exclusive_floor_for_pick(
         else:
             return 10,credit_threthold
     if code == "dreamina_workflow":
-        credit_threthold = _DREAMINA_MIN_CREDIT - _DREAMINA_GIFT_CREDIT;
-        return _DREAMINA_MIN_CREDIT,credit_threthold
+        if _is_no_submit_payload(payload):
+            return 0, 0
+        credit_threthold = _dreamina_estimated_credit_cost(payload)
+        return credit_threthold, credit_threthold
     if code == "leonardo_workflow":
         return 1, credit_threthold
     if code == "gpt_workflow":
@@ -2446,6 +2502,15 @@ class TaskService:
                     await self.db.consume_mapping_quota(picked.mapping_id, amount=20)
                 elif n == 1:
                     await self.db.consume_mapping_quota(picked.mapping_id, amount=10)
+            except Exception:
+                pass
+        elif handler == "dreamina_workflow":
+            try:
+                if not _is_no_submit_payload(payload):
+                    await self.db.consume_mapping_quota(
+                        picked.mapping_id,
+                        amount=_dreamina_estimated_credit_cost(payload),
+                    )
             except Exception:
                 pass
 

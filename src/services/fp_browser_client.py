@@ -709,6 +709,40 @@ class FPBrowserClient:
         }
         return await self._roxy_browser_delete(base_url=base_url, token=access_key, data=payload)
 
+    async def create_window(
+        self,
+        *,
+        vendor: str,
+        base_url: str,
+        access_key: Optional[str],
+        space_id: str,
+        window_name: Optional[str] = None,
+        open_urls: Optional[List[str]] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """创建浏览器窗口（RoxyBrowser：POST /browser/create）。"""
+        vendor = (vendor or "roxy").strip().lower()
+        base_url = (base_url or "").strip().rstrip("/")
+        space_id = (space_id or "").strip()
+        if not base_url or not space_id:
+            raise RuntimeError("create_window 参数不足：base_url/space_id 不能为空")
+        if vendor not in ("roxy", "roxybrowser", "generic"):
+            raise RuntimeError(f"暂不支持 vendor={vendor} 的 create_window，请设置为 roxy")
+        try:
+            workspace_id = int(space_id)
+        except Exception:
+            raise RuntimeError("RoxyBrowser 的 space_id 请填写 workspaceId（纯数字）")
+
+        payload: Dict[str, Any] = dict(extra or {})
+        payload["workspaceId"] = int(workspace_id)
+        name = str(window_name or "").strip()
+        if name:
+            payload["windowName"] = name
+        urls = [str(x or "").strip() for x in (open_urls or []) if str(x or "").strip()]
+        if urls:
+            payload["windowOpenUrls"] = urls
+        return await self._roxy_browser_create(base_url=base_url, token=access_key, data=payload)
+
     async def find_accounts_by_keys(
         self,
         *,
@@ -1314,6 +1348,9 @@ class FPBrowserClient:
 
     async def _roxy_browser_delete(self, *, base_url: str, token: Optional[str], data: Dict[str, Any]) -> Dict[str, Any]:
         return await self._roxy_post(base_url, token, "/browser/delete", data or {})
+
+    async def _roxy_browser_create(self, *, base_url: str, token: Optional[str], data: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._roxy_post(base_url, token, "/browser/create", data or {})
 
     async def _roxy_proxy_create(self, *, base_url: str, token: Optional[str], data: Dict[str, Any]) -> Dict[str, Any]:
         return await self._roxy_post(base_url, token, "/proxy/create", data or {})
