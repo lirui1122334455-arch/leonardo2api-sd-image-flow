@@ -2750,7 +2750,7 @@ class TaskService:
     async def _try_dispatch_all(self) -> None:
         async with self._queue_lock:
             still_pending: deque[QueuedTask] = deque()
-            exhausted_types: set[str] = set()
+            exhausted_type_floors: dict[str, int] = {}
             now = time.monotonic()
 
             while self._pending_queue:
@@ -2770,9 +2770,14 @@ class TaskService:
                     logger.warning("task queue timeout: %s", item.task_id)
                     continue
 
-                if item.task_type_code in exhausted_types and item.required_window_pk is None:
-                    still_pending.append(item)
-                    continue
+                queue_floor, _queue_credit_threshold = _remaining_quota_exclusive_floor_for_pick(
+                    item.task_type_code, item.payload
+                )
+                if item.required_window_pk is None:
+                    exhausted_floor = exhausted_type_floors.get(item.task_type_code)
+                    if exhausted_floor is not None and queue_floor >= exhausted_floor:
+                        still_pending.append(item)
+                        continue
 
                 # 专用窗口任务：先检查并发限制
                 _dedicated_acquired = False
@@ -2817,7 +2822,10 @@ class TaskService:
                     if _dedicated_acquired:
                         async with self._dedicated_window_lock:
                             self._dedicated_window_inflight = max(0, self._dedicated_window_inflight - 1)
-                    exhausted_types.add(item.task_type_code)
+                    if item.required_window_pk is None:
+                        prev_floor = exhausted_type_floors.get(item.task_type_code)
+                        if prev_floor is None or queue_floor < prev_floor:
+                            exhausted_type_floors[item.task_type_code] = queue_floor
                     still_pending.append(item)
 
             self._pending_queue = still_pending

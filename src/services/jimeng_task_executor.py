@@ -119,8 +119,12 @@ _DREAMINA_MODEL_ALIASES: Dict[str, str] = {
     "dreamina_seedance_40_mini": _MODEL_SEEDANCE_20_MINI,
 }
 _SEEDANCE_BENEFIT_FAST_T2V_OUTPUT = "seedance_20_fast_720p_output"
+_SEEDANCE_BENEFIT_FAST_DEFAULT = "dreamina_seedance_20_fast"
+_SEEDANCE_BENEFIT_FAST_WITH_VIDEO = "dreamina_seedance_20_fast_with_video"
 _SEEDANCE_BENEFIT_MINI_OUTPUT = "seedance_20_mini_720p_output"
 _SEEDANCE_BENEFIT_PRO_OUTPUT = "seedance_20_pro_720p_output"
+_SEEDANCE_BENEFIT_PRO_DEFAULT = "dreamina_video_seedance_20_pro"
+_SEEDANCE_BENEFIT_PRO_WITH_VIDEO = "dreamina_video_seedance_20_video_add"
 
 _DREAMINA_COMMERCE_BASE = "https://commerce.us.capcut.com"
 _DREAMINA_COMMERCE_BASE_CA = "https://commerce-api-sg.capcut.com"
@@ -133,6 +137,7 @@ _DREAMINA_MATERIAL_TYPE_CODES: Dict[str, int] = {
     "video": 2,
     "audio": 3,
 }
+_DREAMINA_SG_COUNTRY_CODES = {"ca", "tr", "vn"}
 
 
 def _dreamina_key(vendor: str, base_url: str, space_id: str, window_key: str) -> str:
@@ -162,32 +167,33 @@ def _drop_dreamina_session(cache_key: str) -> None:
         _DREAMINA_SESSIONS.pop(k, None)
 
 
+def _dreamina_uses_sg_endpoint(country_code: Any) -> bool:
+    return _one_str(country_code).lower() in _DREAMINA_SG_COUNTRY_CODES
+
+
+def _dreamina_region_for_country(country_code: Any) -> str:
+    code = _one_str(country_code).upper()
+    return code or _DREAMINA_REGION
+
+
 def _dreamina_api_base_for_country(country_code: Any) -> str:
-    if _one_str(country_code).lower() == "ca":
-        return _DREAMINA_API_BASE_CA
-    
-    if _one_str(country_code).lower() == "tr":
+    if _dreamina_uses_sg_endpoint(country_code):
         return _DREAMINA_API_BASE_CA
     return _DREAMINA_API_BASE
 
 
 def _dreamina_imagex_base_for_country(country_code: Any) -> str:
-    if _one_str(country_code).lower() == "ca":
-        return _DREAMINA_IMAGEX_BASE_CA
-    
-    if _one_str(country_code).lower() == "tr":
+    if _dreamina_uses_sg_endpoint(country_code):
         return _DREAMINA_IMAGEX_BASE_CA
     return _DREAMINA_IMAGEX_BASE
 
 
 
 def _dreamina_commerce_base_for_country(country_code: Any) -> str:
-    if _one_str(country_code).lower() == "ca":
+    if _dreamina_uses_sg_endpoint(country_code):
         return _DREAMINA_COMMERCE_BASE_CA;
     if _one_str(country_code).lower() == "us":
         return _DREAMINA_COMMERCE_BASE;
-    if _one_str(country_code).lower() == "tr":
-        return _DREAMINA_COMMERCE_BASE_CA;
     return _DREAMINA_COMMERCE_BASE;
 
 
@@ -1055,12 +1061,69 @@ def _dreamina_bind_prompt_materials(
     - material_kinds
     """
     subject_iter = iter(subject_refs or [])
-    external_iter = iter(external_refs or [])
+    external_remaining = list(external_refs or [])
     material_list: List[Dict[str, Any]] = []
     meta_list: List[Dict[str, Any]] = []
     material_kinds: List[str] = []
     cleaned_parts: List[str] = []
     image_idx = 0
+
+    def normalize_token(v: Any) -> str:
+        s = _one_str(v).lstrip("@").strip().lower()
+        if not s:
+            return ""
+        return os.path.splitext(s)[0] or s
+
+    def ref_token_keys(ref: Dict[str, Any]) -> set[str]:
+        keys: set[str] = set()
+        for key in ("alias", "field_name", "subject_name", "name", "filename"):
+            norm = normalize_token(ref.get(key))
+            if norm:
+                keys.add(norm)
+        src = _one_str(ref.get("source") or ref.get("url") or ref.get("image_url") or ref.get("imageUrl"))
+        if src:
+            try:
+                filename = os.path.basename(urlsplit(src).path or src)
+            except Exception:
+                filename = os.path.basename(src)
+            for raw in (filename, os.path.splitext(filename)[0]):
+                norm = normalize_token(raw)
+                if norm:
+                    keys.add(norm)
+        return keys
+
+    def pop_external_ref(token: str) -> Optional[Dict[str, Any]]:
+        if not external_remaining:
+            return None
+        token_norm = normalize_token(token)
+        if token_norm:
+            for idx, ref in enumerate(external_remaining):
+                if token_norm in ref_token_keys(ref):
+                    return external_remaining.pop(idx)
+        return external_remaining.pop(0)
+
+    def append_image_material(ref: Dict[str, Any]) -> None:
+        nonlocal image_idx
+        uri = _one_str(ref.get("uri"))
+        if not uri:
+            raise NonPenalizedTaskError('多余的那几个非数字"@xxx"找不到', status_code=422, content_violation=True)
+        material_list.append({
+            "type": "", "id": str(uuid.uuid4()), "material_type": "image",
+            "image_info": {
+                **_dreamina_image_info(uri, int(ref.get("width") or 0), int(ref.get("height") or 0)),
+                "aigc_image": {"type": "", "id": str(uuid.uuid4())},
+                "title": "test",
+            },
+        })
+        material_kinds.append("image")
+        meta_list.append({
+            "type": "",
+            "id": str(uuid.uuid4()),
+            "meta_type": "image",
+            "text": "",
+            "material_ref": {"material_idx": image_idx},
+        })
+        image_idx += 1
 
     for part in parts or []:
         ptype = _one_str(part.get("type"))
@@ -1091,35 +1154,18 @@ def _dreamina_bind_prompt_materials(
             continue
 
         if ptype == "image":
-            ref = next(external_iter, None)
+            ref = pop_external_ref(_one_str(part.get("token")))
             if ref is None:
                 raise NonPenalizedTaskError('多余的那几个非数字"@xxx"找不到', status_code=422, content_violation=True)
-            uri = _one_str(ref.get("uri"))
-            if not uri:
-                raise NonPenalizedTaskError('多余的那几个非数字"@xxx"找不到', status_code=422, content_violation=True)
-            material_list.append({
-                "type": "", "id": str(uuid.uuid4()), "material_type": "image",
-                "image_info": {
-                    **_dreamina_image_info(uri, int(ref.get("width") or 0), int(ref.get("height") or 0)),
-                    "aigc_image": {"type": "", "id": str(uuid.uuid4())},
-                    "title": "test",
-                },
-            })
-            material_kinds.append("image")
-            meta_list.append({
-                "type": "",
-                "id": str(uuid.uuid4()),
-                "meta_type": "image",
-                "text": "",
-                "material_ref": {"material_idx": image_idx},
-            })
-            image_idx += 1
+            append_image_material(ref)
             continue
 
     if next(subject_iter, None) is not None:
         raise NonPenalizedTaskError('@"数字"未找到图片', status_code=422, content_violation=True)
-    if next(external_iter, None) is not None:
-        raise NonPenalizedTaskError('多余的那几个非数字"@xxx"找不到', status_code=422, content_violation=True)
+    # @name marks where an already-uploaded image is described. It does not add
+    # another image; any unmentioned uploads remain regular omni references.
+    for ref in external_remaining:
+        append_image_material(ref)
 
     if not meta_list:
         meta_list.append({"type": "", "id": str(uuid.uuid4()), "meta_type": "text", "text": ""})
@@ -2378,11 +2424,17 @@ def _dreamina_seedance_generate_body(
     subject_count = sum(1 for x in material_kinds if x == "subject")
     material_type_codes = [_DREAMINA_MATERIAL_TYPE_CODES[x] for x in material_kinds if x in _DREAMINA_MATERIAL_TYPE_CODES]
     use_subject_material = subject_count > 0
+    has_input_media = any(x in ("video", "audio") for x in material_kinds)
     # 标准 Seedance 2.0（文生视频/omni 参考图/首尾帧）与“封装的 fast”扣费字段不同：
     # benefit_type 需要带输出规格，并带 amount/workspace_id；否则会命中旧的 dreamina_seedance_20_fast 路径。
-    benefit = _SEEDANCE_BENEFIT_MINI_OUTPUT if is_mini else (
+    output_benefit = _SEEDANCE_BENEFIT_MINI_OUTPUT if is_mini else (
         _SEEDANCE_BENEFIT_FAST_T2V_OUTPUT if is_fast else _SEEDANCE_BENEFIT_PRO_OUTPUT
     )
+    base_benefit = ""
+    if is_fast:
+        base_benefit = _SEEDANCE_BENEFIT_FAST_WITH_VIDEO if has_input_media else _SEEDANCE_BENEFIT_FAST_DEFAULT
+    elif not is_mini:
+        base_benefit = _SEEDANCE_BENEFIT_PRO_WITH_VIDEO if has_input_media else _SEEDANCE_BENEFIT_PRO_DEFAULT
     function_mode = "first_last_frames" if mode == "first_last_frames" else "omni_reference"
     extra_vip_function_key = f"{model}-{resolution}" if is_standard_output else model
     scene_option: Dict[str, Any] = {
@@ -2451,11 +2503,28 @@ def _dreamina_seedance_generate_body(
                 "video_task_extra": metrics_extra}},
             "process_type": 1}],
     }
-    commerce_info: Dict[str, Any] = {"benefit_type": benefit, "resource_id": "generate_video", "resource_id_type": "str", "resource_sub_type": "aigc"}
-    if is_standard_output:
-        commerce_info["amount"] = duration
+    def make_commerce_info(benefit_type: str, amount: Optional[int] = None) -> Dict[str, Any]:
+        info: Dict[str, Any] = {
+            "benefit_type": benefit_type,
+            "resource_id": "generate_video",
+            "resource_id_type": "str",
+            "resource_sub_type": "aigc",
+        }
+        if amount is not None:
+            info["amount"] = int(amount)
+        return info
+
+    output_amount = duration if is_standard_output else None
+    commerce_info = make_commerce_info(output_benefit, output_amount)
+    commerce_info_list: List[Dict[str, Any]] = []
+    if base_benefit and base_benefit != output_benefit:
+        # Fast/Pro official config carries a default/input-video entitlement in
+        # addition to the resolution output benefit. Without it, unified-edit
+        # tasks with uploaded videos/audios can fail with ret=1006.
+        commerce_info_list.append(make_commerce_info(base_benefit, 0))
+    commerce_info_list.append(dict(commerce_info))
     body = {
-        "extend": {"root_model": model, "m_video_commerce_info": commerce_info, "workspace_id": 0, "m_video_commerce_info_list": [dict(commerce_info)]},
+        "extend": {"root_model": model, "m_video_commerce_info": commerce_info, "workspace_id": 0, "m_video_commerce_info_list": commerce_info_list},
         "submit_id": submit_id, "metrics_extra": metrics_extra, "draft_content": json.dumps(draft, ensure_ascii=False, separators=(",", ":")),
         "http_common_info": {"aid": _DREAMINA_AID},
     }
@@ -2927,13 +2996,13 @@ class DreaminaSession:
         else:
             await _inner()
 
-    async def refresh_store_country_code_from_cookies(self, *, target_url: str = DEFAULT_DREAMINA_TARGET) -> str:
+    async def refresh_store_country_code_from_cookies(self, *, target_url: str = DEFAULT_DREAMINA_TARGET, force: bool = False) -> str:
         """读取 Dreamina/CapCut Cookie 中的 store-country-code 并缓存到 session。
 
         该值代表当前窗口所在的 IP 区域，例如 us/ca。读取失败或 Cookie 不存在时不抛错，
         保留原缓存并返回空字符串，避免影响已有任务流程。
         """
-        if self.store_country_code is not None and self.store_country_code != "":
+        if not force and self.store_country_code is not None and self.store_country_code != "":
             return self.store_country_code
         
         page = getattr(self.pw_ctx, "page", None)
@@ -2995,6 +3064,10 @@ class DreaminaSession:
     @property
     def dreamina_header_loc(self) -> str:
         return _dreamina_header_loc_for_country(self.store_country_code)
+
+    @property
+    def dreamina_region(self) -> str:
+        return _dreamina_region_for_country(self.store_country_code)
 
     def _cancel_idle_close(self) -> None:
         t = self.idle_close_task
@@ -3885,6 +3958,85 @@ def _dreamina_credit_info_from_ui(total_credit: int, *, source: str, raw_text: s
     }
 
 
+def _dreamina_ctx_get(row: Any, key: str, default: Any = None) -> Any:
+    if isinstance(row, dict):
+        return row.get(key, default)
+    return getattr(row, key, default)
+
+
+def _dreamina_ctx_bool(v: Any, default: bool = False) -> bool:
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    return _one_str(v).lower() in ("1", "true", "yes", "y", "on")
+
+
+async def _dreamina_refresh_country_code_from_picked_browser(
+    *,
+    target_url: str,
+    db: Any = None,
+    picked: Any = None,
+    log_file: Optional[Path] = None,
+) -> str:
+    log_file = log_file or MONITOR_LOG_FILE
+    if db is None or picked is None:
+        return ""
+
+    mapping_id = int(_dreamina_ctx_get(picked, "mapping_id", 0) or _dreamina_ctx_get(picked, "id", 0) or 0)
+    row: Any = None
+    if mapping_id > 0:
+        try:
+            row = await db.get_task_type_window_context(mapping_id)
+        except Exception as e:
+            append_log(log_file, f"[dreamina-store-country] context lookup failed: mapping={mapping_id} err={safe_trim(str(e), 200)}")
+            row = None
+    src = row or picked
+
+    vendor = _one_str(_dreamina_ctx_get(src, "vendor") or _dreamina_ctx_get(src, "browser_vendor") or "roxy")
+    base_url = _one_str(_dreamina_ctx_get(src, "lan_addr") or _dreamina_ctx_get(src, "browser_base_url"))
+    access_key = _dreamina_ctx_get(src, "access_key") if _dreamina_ctx_get(src, "access_key") is not None else _dreamina_ctx_get(src, "browser_access_key")
+    space_id = _one_str(_dreamina_ctx_get(src, "space_id"))
+    window_key = _one_str(_dreamina_ctx_get(src, "window_key"))
+    if not base_url or not space_id or not window_key:
+        append_log(log_file, f"[dreamina-store-country] browser country skipped: missing context mapping={mapping_id}")
+        return ""
+
+    target = _one_str(_dreamina_ctx_get(src, "default_target_url")) or _one_str(target_url) or DEFAULT_DREAMINA_TARGET
+    headless = _dreamina_ctx_bool(_dreamina_ctx_get(src, "headless"), default=False)
+    pure_mode = _dreamina_ctx_bool(_dreamina_ctx_get(src, "pure_mode"), default=True)
+
+    sess = get_or_create_dreamina_session(
+        vendor=vendor,
+        base_url=base_url,
+        access_key=access_key,
+        space_id=space_id,
+        window_key=window_key,
+    )
+    sess.browser_headless = headless
+    sess.browser_pure_mode = pure_mode
+
+    async with sess._bring_drafts_lock:
+        await sess.ensure_open(
+            args=sess.browser_open_args,
+            force_open=sess.browser_force_open,
+            headless=headless,
+            acquire_bring_lock=False,
+            pure_mode=pure_mode,
+        )
+        await sess._bring_target_page_to_front(
+            refresh_target=False,
+            drafts_url=target,
+            acquire_bring_lock=False,
+            close_other_pages=False,
+        )
+        code = _one_str(await sess.refresh_store_country_code_from_cookies(target_url=target, force=True)).lower()
+        if code:
+            append_log(log_file, f"[dreamina-store-country] browser country mapping={mapping_id or '-'} country={code} region={_dreamina_region_for_country(code)}")
+            return code
+    return ""
+
+
 async def _dreamina_fetch_credits_from_browser_ui(
     *,
     target_url: str,
@@ -4094,6 +4246,16 @@ async def dreamina_fetch_credits_in_window(
     # 若需要“两层代理”，请确保本机到 window_proxy 的 TCP 连接已经被系统固定代理透明承载。
     proxy_url = window_proxy or system_proxy or None
     cc = _one_str(country_code).lower()
+    if not cc:
+        try:
+            cc = await _dreamina_refresh_country_code_from_picked_browser(
+                target_url=target_url,
+                db=db,
+                picked=picked,
+                log_file=log_file,
+            )
+        except Exception as e:
+            append_log(log_file, f"[dreamina-store-country] browser country refresh failed: {safe_trim(str(e), 200)}")
     commerce_base = _dreamina_commerce_base_for_country(cc)
     header_loc = _dreamina_header_loc_for_country(cc)
     header_lan = header_loc or "en"
@@ -4773,7 +4935,7 @@ async def _dreamina_fetch_hq_video_url(
 ) -> str:
     query_url = (
         f"{api_base}{_DREAMINA_GET_LOCAL_ITEM_LIST_PATH}"
-        f"?aid={_DREAMINA_AID}&device_platform=web&region={_DREAMINA_REGION}"
+        f"?aid={_DREAMINA_AID}&device_platform=web&region={_dreamina_region_for_country(header_loc)}"
         f"&da_version={_DREAMINA_DRAFT_VERSION}&web_version={_DREAMINA_WEB_VERSION}"
         f"&aigc_features={_DREAMINA_AIGC_FEATURES}"
     )
@@ -4912,7 +5074,7 @@ async def _dreamina_poll_history_until_result(
 
     query_url = (
         f"{sess.dreamina_api_base}{_DREAMINA_GET_HISTORY_BY_IDS_PATH}"
-        f"?aid={_DREAMINA_AID}&device_platform=web&region={_DREAMINA_REGION}"
+        f"?aid={_DREAMINA_AID}&device_platform=web&region={sess.dreamina_region}"
         f"&da_version={_DREAMINA_DRAFT_VERSION}&web_version={_DREAMINA_WEB_VERSION}"
         f"&aigc_features={_DREAMINA_AIGC_FEATURES}"
     )
@@ -5104,7 +5266,7 @@ async def _dreamina_single_image_upload_save_workflow(
         raise NonPenalizedTaskError(f"Dreamina CommitImageUpload 失败 uri/width/height: {safe_trim(_compact_json(upload_info.get('commit_response')), 700)}", status_code=502)
 
     await progress_cb(45, {"stage": "get_image_by_uri", "uri": uri})
-    get_url = f"{api_base}{_DREAMINA_GET_IMAGE_BY_URI_PATH}?aid={_DREAMINA_AID}&device_platform=web&region={_DREAMINA_REGION}&web_version={_DREAMINA_WEB_VERSION}&da_version={_DREAMINA_DRAFT_VERSION}&aigc_features={_DREAMINA_AIGC_FEATURES}"
+    get_url = f"{api_base}{_DREAMINA_GET_IMAGE_BY_URI_PATH}?aid={_DREAMINA_AID}&device_platform=web&region={_dreamina_region_for_country(header_loc)}&web_version={_DREAMINA_WEB_VERSION}&da_version={_DREAMINA_DRAFT_VERSION}&aigc_features={_DREAMINA_AIGC_FEATURES}"
     img_tx = await page_fetch_json(
         page, url=get_url, method="POST",
         headers=build_jimeng_page_fetch_headers_body(uri=_DREAMINA_GET_IMAGE_BY_URI_PATH, appid=_DREAMINA_AID, appvr=_APPVR, pf="7", lan="en", loc=header_loc, headers={"Referer": target_page}),
@@ -5229,7 +5391,7 @@ async def dreamina_workflow(
     elif prompt_subject_ids:
         append_log(log_file, f"[dreamina-subject-ref] prompt_ids={prompt_subject_ids} matched=0, ignored")
 
-    if prompt_image_tokens and len(prompt_image_tokens) != len(omni_refs):
+    if prompt_image_tokens and len(prompt_image_tokens) > len(omni_refs):
         raise NonPenalizedTaskError(f'参考图片【{prompt_image_tokens[-1].get("raw")}】 未找到', status_code=422, content_violation=True)
     if prompt_subject_refs or prompt_image_tokens:
         p["functionMode"] = "omni_reference"
@@ -5302,16 +5464,35 @@ async def dreamina_workflow(
                 if page is None:
                     raise NonPenalizedTaskError("Dreamina 页面未打开", status_code=502)
 
-                store_country_code = ""
+                db_store_country_code = ""
                 try:
                     if db is not None:
-                        store_country_code = await db.get_window_bound_ip_last_country(space_id=space_id, window_key=window_key)
+                        db_store_country_code = await db.get_window_bound_ip_last_country(space_id=space_id, window_key=window_key)
                 except Exception as e:
                     append_log(log_file, f"[dreamina-store-country] read bound ip last_country failed: {safe_trim(str(e), 200)}")
+                sess.store_country_code = db_store_country_code
+                try:
+                    await sess.refresh_store_country_code_from_cookies(target_url=target_page, force=True)
+                except Exception as e:
+                    append_log(log_file, f"[dreamina-store-country] refresh cookie country failed: {safe_trim(str(e), 200)}")
+                store_country_code = _one_str(sess.store_country_code).lower()
                 sess.store_country_code = store_country_code
+                append_log(
+                    log_file,
+                    "[dreamina-store-country] "
+                    f"db={_one_str(db_store_country_code) or '-'} "
+                    f"effective={store_country_code or '-'} "
+                    f"region={sess.dreamina_region} "
+                    f"api_base={sess.dreamina_api_base} "
+                    f"imagex_base={sess.dreamina_imagex_base} "
+                    f"commerce_base={sess.dreamina_commerce_base} "
+                    f"loc={sess.dreamina_header_loc or '-'}",
+                )
                 await progress_cb(2, {
                     "stage": "store_country_code",
                     "store_country_code": store_country_code,
+                    "db_store_country_code": db_store_country_code,
+                    "dreamina_api_base": sess.dreamina_api_base,
                 })
 
                 if is_image_upload_save:
@@ -5341,7 +5522,7 @@ async def dreamina_workflow(
                 upload_uris: List[str] = []
                 if image_refs:
                     append_log(log_file, f"[dreamina-api-upload] external_refs={safe_trim(_compact_json(image_refs), 1200)}")
-                    if external_prompt_ref_count and external_prompt_ref_count != len(image_refs):
+                    if external_prompt_ref_count and external_prompt_ref_count > len(image_refs):
                         raise NonPenalizedTaskError('多余的那几个非数字"@xxx"找不到', status_code=422, content_violation=True)
                     await progress_cb(3, {"stage": "upload_images_api", "count": len(image_refs)})
                     upload_uris = await _dreamina_upload_image_refs_via_page_fetch(
@@ -5469,11 +5650,24 @@ async def dreamina_workflow(
                     }
                 generate_url = (
                     f"{sess.dreamina_api_base}{_DREAMINA_GENERATE_PATH}"
-                    f"?aid={_DREAMINA_AID}&device_platform=web&region={_DREAMINA_REGION}"
+                    f"?aid={_DREAMINA_AID}&device_platform=web&region={sess.dreamina_region}"
                     f"&da_version={_DREAMINA_DRAFT_VERSION}&os=windows&web_component_open_flag=0&commerce_with_input_video=1"
                     f"&web_version={_DREAMINA_WEB_VERSION}&aigc_features={_DREAMINA_AIGC_FEATURES}"
                 )
-                await progress_cb(6, {"stage": "submit_api", "model_name": model_key, "function_mode": function_mode})
+                commerce_items = ((generate_body.get("extend") or {}).get("m_video_commerce_info_list") or [])
+                commerce_debug = [
+                    {
+                        "benefit_type": _one_str((x or {}).get("benefit_type")),
+                        **({"amount": (x or {}).get("amount")} if (x or {}).get("amount") is not None else {}),
+                    }
+                    for x in commerce_items
+                    if isinstance(x, dict)
+                ]
+                append_log(
+                    log_file,
+                    f"[dreamina-api-submit] model={model_key} material_types={material_types} commerce={safe_trim(_compact_json(commerce_debug), 500)}",
+                )
+                await progress_cb(6, {"stage": "submit_api", "model_name": model_key, "function_mode": function_mode, "region": sess.dreamina_region})
                 try:
                     submit_tx = await page_fetch_json(
                         page,
