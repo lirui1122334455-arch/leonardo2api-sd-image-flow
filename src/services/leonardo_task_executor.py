@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import mimetypes
+import random
 import re
 import time
 from pathlib import Path
@@ -20,9 +21,11 @@ from urllib.parse import parse_qsl, unquote, unquote_to_bytes, urlencode, urlpar
 import httpx
 
 from ..core.paths import MONITOR_LOG_FILE
+from .fp_browser_client import FPBrowserClient
 from .playwright_broswer_context import (
     append_log,
     get_or_create_ctx as get_or_create_playwright_ctx,
+    normalize_cdp_endpoint,
     page_fetch_json,
     page_fetch_tx,
     safe_trim,
@@ -31,10 +34,15 @@ from .task_executor_types import NonPenalizedTaskError, ProgressCB
 
 
 DEFAULT_LEONARDO_TARGET = "https://app.leonardo.ai/generate?model=seedance-2.0-fast"
+LEONARDO_LOGIN_URL = "https://app.leonardo.ai/auth/login"
 LEONARDO_GRAPHQL_URL = "https://api.leonardo.ai/v1/graphql"
 LEONARDO_SESSION_PING_PATH = "/api/auth/cross-origin-cookie"
 LEONARDO_SCHEMA_VERSION = "1.209.3"
 LEONARDO_DEFAULT_AUTH_CACHE_SECONDS = 600.0
+LEONARDO_DEFAULT_CF_REFRESH_TTL_SECONDS = 600.0
+LEONARDO_CF_ACCESS_COOKIE = "CF_Access_Token"
+LEONARDO_BETTER_AUTH_SESSION_COOKIE = "__Secure-better-auth.session_token"
+LEONARDO_BETTER_AUTH_DATA_PREFIX = "__Secure-better-auth.session_data"
 LEONARDO_SEEDANCE_MODEL = "seedance-2.0"
 LEONARDO_SEEDANCE_FAST_MODEL = "seedance-2.0-fast"
 LEONARDO_SEEDANCE_MINI_MODEL = "seedance-2.0-mini"
@@ -72,6 +80,26 @@ _VIDEO_URL_KEY_HINTS = {
     "videourl",
     "video_url",
 }
+
+
+def drop_leonardo_auth_cache(cache_key: str) -> None:
+    k = _one_str(cache_key)
+    if not k:
+        return
+    _LEONARDO_AUTH_CACHE.pop(k, None)
+
+
+def _cached_leonardo_auth_headers(cache_key: str) -> Dict[str, str]:
+    key = _one_str(cache_key)
+    cached = _LEONARDO_AUTH_CACHE.get(key)
+    if not cached:
+        return {}
+    if time.time() >= float(cached[0] or 0.0):
+        drop_leonardo_auth_cache(key)
+        return {}
+    return dict(cached[1] or {})
+
+
 _LEONARDO_UPLOAD_TYPE_INIT = "INIT"
 _LEONARDO_INIT_IMAGE_TYPE_UPLOADED = "UPLOADED"
 _LEONARDO_INIT_IMAGE_TYPE_GENERATED = "GENERATED"
@@ -414,6 +442,213 @@ def _leonardo_block_message(reason: str, *, stage: str, page_url: str = "") -> s
     return f"Leonardo page is not usable. stage={stage} reason={reason or 'unknown'} url={safe_trim(page_url, 180)!r}"
 
 
+def _cookie_expiry_timestamp(cookie: Dict[str, Any]) -> Optional[float]:
+    try:
+        expires = float(cookie.get("expires") or 0)
+    except Exception:
+        return None
+    if expires <= 0:
+        return None
+    return expires
+
+
+async def _leonardo_cookie_session_state(page: Any) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "cookies_checked": False,
+        "cookie_count": 0,
+        "cf_access_token_present": False,
+        "cf_access_token_ttl_seconds": None,
+        "cf_access_token_expires_at": None,
+        "better_auth_session_present": False,
+        "better_auth_session_count": 0,
+        "better_auth_session_data_count": 0,
+    }
+    try:
+        context = getattr(page, "context", None)
+        if context is None:
+            return out
+        cookies = await context.cookies("https://app.leonardo.ai")
+    except Exception as exc:
+        out["cookie_error"] = safe_trim(str(exc), 180)
+        return out
+
+    now = time.time()
+    names = {str((c or {}).get("name") or "") for c in (cookies or [])}
+    cf_cookie = next(
+        (
+            c
+            for c in (cookies or [])
+            if str((c or {}).get("name") or "") == LEONARDO_CF_ACCESS_COOKIE
+        ),
+        None,
+    )
+    expires_at = _cookie_expiry_timestamp(cf_cookie or {}) if cf_cookie else None
+    ttl: Optional[int] = None
+    if expires_at is not None:
+        ttl = max(0, int(expires_at - now))
+    session_names = {
+        name
+        for name in names
+        if name == LEONARDO_BETTER_AUTH_SESSION_COOKIE
+        or name.startswith(f"{LEONARDO_BETTER_AUTH_SESSION_COOKIE}.")
+    }
+    data_count = sum(1 for name in names if name.startswith(LEONARDO_BETTER_AUTH_DATA_PREFIX))
+    out.update(
+        {
+            "cookies_checked": True,
+            "cookie_count": len(cookies or []),
+            "cf_access_token_present": bool(cf_cookie),
+            "cf_access_token_ttl_seconds": ttl,
+            "cf_access_token_expires_at": int(expires_at) if expires_at is not None else None,
+            "better_auth_session_present": bool(session_names),
+            "better_auth_session_count": len(session_names),
+            "better_auth_session_data_count": int(data_count),
+        }
+    )
+    return out
+
+
+def _leonardo_cookie_state_summary(state: Dict[str, Any]) -> str:
+    if not isinstance(state, dict) or not state.get("cookies_checked"):
+        err = safe_trim(str((state or {}).get("cookie_error") or ""), 120)
+        return f"cookies=unavailable{(' err=' + err) if err else ''}"
+    ttl = state.get("cf_access_token_ttl_seconds")
+    ttl_text = "unknown" if ttl is None else str(int(ttl))
+    return (
+        f"cookies={int(state.get('cookie_count') or 0)} "
+        f"cf_present={bool(state.get('cf_access_token_present'))} "
+        f"cf_ttl={ttl_text}s "
+        f"better_auth={bool(state.get('better_auth_session_present'))} "
+        f"session_tokens={int(state.get('better_auth_session_count') or 0)} "
+        f"session_data={int(state.get('better_auth_session_data_count') or 0)}"
+    )
+
+
+async def _leonardo_logged_in_ui_state(page: Any) -> Dict[str, Any]:
+    """Classify the visible app state without navigating or mutating the page."""
+    out: Dict[str, Any] = {
+        "status": "unknown",
+        "checked": False,
+        "page_url": "",
+        "title": "",
+        "evidence": [],
+        "login_form_visible": False,
+        "cloudflare_visible": False,
+    }
+    if page is None:
+        out["error"] = "missing page"
+        return out
+    try:
+        if page.is_closed():
+            out["error"] = "page closed"
+            return out
+    except Exception:
+        pass
+
+    try:
+        state = await page.evaluate(
+            r"""() => {
+                const visible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden'
+                        && Number(style.opacity || 1) !== 0 && rect.width > 0 && rect.height > 0;
+                };
+                const anyVisible = (selector) =>
+                    Array.from(document.querySelectorAll(selector)).some(visible);
+                const visibleText = (selector) => {
+                    const el = Array.from(document.querySelectorAll(selector)).find(visible);
+                    return el ? String(el.innerText || el.textContent || '').trim().slice(0, 80) : '';
+                };
+                const bodyText = String(document.body?.innerText || '').slice(0, 12000);
+                return {
+                    url: location.href,
+                    title: document.title || '',
+                    balance: visibleText('[aria-label="View token balance"]'),
+                    hasBalance: anyVisible('[aria-label="View token balance"]'),
+                    hasProfile: anyVisible('[aria-label="Profile menu"]'),
+                    hasMainNav: anyVisible('[aria-label="Main navigation"]'),
+                    hasLibrary: anyVisible('a[href="/library"], a[href^="/library?"]'),
+                    hasGenerate: anyVisible('a[href^="/generate"], [data-testid="prompt-container"]'),
+                    hasSettings: anyVisible('a[href^="/settings/"], [aria-label="Settings"]'),
+                    hasEmailInput: anyVisible('input[type="email"], input[name="email"], input[autocomplete="email"]'),
+                    hasPasswordInput: anyVisible('input[type="password"], input[name="password"]'),
+                    hasEmailLoginButton: Array.from(document.querySelectorAll('button, [role="button"]'))
+                        .filter(visible)
+                        .some((el) => /continue\s+with\s+email|sign\s*in|log\s*in/i.test(String(el.innerText || el.textContent || ''))),
+                    hasCloudflare: anyVisible('iframe[src*="challenges.cloudflare.com"], .cf-turnstile, [name="cf-turnstile-response"]')
+                        || /verify you are human|just a moment|security checkpoint/i.test(bodyText)
+                        || /just a moment|attention required|security checkpoint/i.test(document.title || '')
+                };
+            }"""
+        )
+    except Exception as exc:
+        out["error"] = safe_trim(str(exc), 180)
+        try:
+            out["page_url"] = _one_str(getattr(page, "url", ""))
+        except Exception:
+            pass
+        return out
+
+    state = state if isinstance(state, dict) else {}
+    page_url = _one_str(state.get("url") or getattr(page, "url", ""))
+    try:
+        parsed = urlparse(page_url)
+        host = (parsed.hostname or "").lower()
+        path = (parsed.path or "/").lower()
+    except Exception:
+        host = ""
+        path = ""
+    auth_route = host == "app.leonardo.ai" and path.startswith("/auth/")
+    app_route = host == "app.leonardo.ai" and not auth_route
+
+    evidence: List[str] = []
+    for key, label in (
+        ("hasBalance", "token_balance"),
+        ("hasProfile", "profile_menu"),
+        ("hasMainNav", "main_navigation"),
+        ("hasLibrary", "library_link"),
+        ("hasGenerate", "generate_ui"),
+        ("hasSettings", "settings_link"),
+    ):
+        if bool(state.get(key)):
+            evidence.append(label)
+    strong_authenticated = bool(state.get("hasBalance") or state.get("hasProfile"))
+    structural_authenticated = sum(
+        1 for key in ("hasMainNav", "hasLibrary", "hasGenerate", "hasSettings") if bool(state.get(key))
+    ) >= 3
+    logged_in = app_route and (strong_authenticated or structural_authenticated)
+    login_form_visible = bool(
+        state.get("hasEmailInput") or state.get("hasPasswordInput") or state.get("hasEmailLoginButton")
+    )
+    cloudflare_visible = bool(state.get("hasCloudflare"))
+
+    if cloudflare_visible:
+        status = "manual_verification"
+    elif logged_in:
+        status = "online"
+    elif auth_route:
+        status = "offline"
+    else:
+        status = "unknown"
+    out.update(
+        {
+            "status": status,
+            "checked": True,
+            "page_url": page_url,
+            "title": safe_trim(_one_str(state.get("title")), 160),
+            "evidence": evidence,
+            "balance_text": safe_trim(_one_str(state.get("balance")), 40),
+            "auth_route": auth_route,
+            "app_route": app_route,
+            "login_form_visible": login_form_visible,
+            "cloudflare_visible": cloudflare_visible,
+        }
+    )
+    return out
+
+
 async def _leonardo_page_block_reason(page: Any, *, deep: bool = False) -> str:
     if page is None:
         return ""
@@ -441,31 +676,12 @@ async def _leonardo_page_block_reason(page: Any, *, deep: bool = False) -> str:
             or "cloudflare" in title
         ):
             return "cloudflare_challenge"
-        if ("sign in" in title or "log in" in title or "login" in title) and "leonardo" in title:
-            return "login_required"
     if not deep:
         return ""
-    try:
-        html = (await page.content() or "").lower()
-    except Exception:
-        html = ""
-    if not html:
-        return ""
-    if (
-        "verify you are human" in html
-        or "cf-challenge" in html
-        or "cf-ray" in html
-        or "challenges.cloudflare.com" in html
-        or ("cloudflare" in html and ("just a moment" in html or "/cdn-cgi/" in html))
-        or ("turnstile" in html and ("cloudflare" in html or "/cdn-cgi/" in html))
-    ):
+    ui_state = await _leonardo_logged_in_ui_state(page)
+    if ui_state.get("status") == "manual_verification":
         return "cloudflare_challenge"
-    if (
-        "auth/login" in html
-        or "auth/signin" in html
-        or ("sign in" in html and "leonardo" in html)
-        or ("log in" in html and "leonardo" in html)
-    ):
+    if ui_state.get("status") == "offline":
         return "login_required"
     return ""
 
@@ -552,8 +768,22 @@ async def _capture_graphql_headers(
 ) -> Dict[str, str]:
     now = time.time()
     cached = _LEONARDO_AUTH_CACHE.get(cache_key)
-    await _raise_if_leonardo_page_blocked(page, stage="before_auth_capture")
+    try:
+        await _raise_if_leonardo_page_blocked(page, stage="before_auth_capture")
+    except NonPenalizedTaskError:
+        drop_leonardo_auth_cache(cache_key)
+        raise
+    if cached and now >= cached[0]:
+        drop_leonardo_auth_cache(cache_key)
+        cached = None
     if cache_seconds > 0 and cached and now < cached[0]:
+        auth_session = await _leonardo_auth_session_probe(page, timeout_seconds=10.0)
+        if auth_session.get("authenticated") is False:
+            drop_leonardo_auth_cache(cache_key)
+            raise NonPenalizedTaskError(
+                "Leonardo account is logged out; cached auth header was discarded.",
+                status_code=401,
+            )
         return dict(cached[1])
 
     loop = asyncio.get_running_loop()
@@ -615,15 +845,815 @@ async def _leonardo_session_ping(page: Any, *, log_file: Path) -> Dict[str, Any]
     status = int(tx.get("status") or 0)
     if status in {200, 204} or (200 <= status < 300):
         return {"ok": True, "status": status}
-    if status in {401, 403}:
-        raise NonPenalizedTaskError(
-            f"Leonardo session ping unauthorized: status={status}",
-            status_code=401,
+    return {
+        "ok": False,
+        "status": status,
+        "unauthorized": status in {401, 403},
+        "transient": status == 0 or status == 429 or status >= 500,
+    }
+
+
+async def _leonardo_auth_session_probe(page: Any, *, timeout_seconds: float = 10.0) -> Dict[str, Any]:
+    """Read Better Auth session presence without returning user or token data."""
+    try:
+        raw = await asyncio.wait_for(
+            page.evaluate(
+                """async () => {
+                    try {
+                        const response = await fetch('/api/auth/get-session', {
+                            method: 'GET',
+                            credentials: 'include',
+                            headers: {Accept: 'application/json'}
+                        });
+                        let value = null;
+                        let parsed = false;
+                        try { value = await response.json(); parsed = true; } catch (_) {}
+                        const objectValue = value && typeof value === 'object' ? value : null;
+                        return {
+                            status: response.status,
+                            hasSession: Boolean(objectValue && objectValue.session),
+                            hasUser: Boolean(objectValue && objectValue.user),
+                            empty: Boolean(parsed && (value === null || (objectValue && Object.keys(objectValue).length === 0)))
+                        };
+                    } catch (error) {
+                        return {status: 0, error: String(error)};
+                    }
+                }"""
+            ),
+            timeout=max(3.0, float(timeout_seconds)),
         )
-    raise NonPenalizedTaskError(
-        f"Leonardo session ping failed: status={status} body={safe_trim(str(tx.get('response_body') or ''), 240)}",
-        status_code=502,
+    except Exception as exc:
+        return {"authenticated": None, "authoritative": False, "status": 0, "error": safe_trim(str(exc), 180)}
+    raw = raw if isinstance(raw, dict) else {}
+    status = int(raw.get("status") or 0)
+    has_identity = bool(raw.get("hasSession") and raw.get("hasUser"))
+    if status == 200 and has_identity:
+        authenticated: Optional[bool] = True
+        authoritative = True
+    elif status == 200 and bool(raw.get("empty")):
+        authenticated = False
+        authoritative = True
+    elif status in {401, 403}:
+        authenticated = False
+        authoritative = True
+    else:
+        authenticated = None
+        authoritative = False
+    return {
+        "authenticated": authenticated,
+        "authoritative": authoritative,
+        "status": status,
+        **({"error": safe_trim(str(raw.get("error") or ""), 180)} if raw.get("error") else {}),
+    }
+
+
+async def _leonardo_click_creation_mode_toggle(page: Any, *, log_file: Path) -> Dict[str, Any]:
+    """Light UI activity: switch Image -> Video with mouse-like browser events."""
+    out: Dict[str, Any] = {
+        "attempted": False,
+        "image_clicked": False,
+        "video_clicked": False,
+        "real_mouse": False,
+        "skipped_reason": "",
+    }
+    blocked_reason = await _leonardo_page_block_reason(page, deep=True)
+    if blocked_reason:
+        out["skipped_reason"] = blocked_reason
+        return out
+
+    async def _human_pause(min_seconds: float = 0.15, max_seconds: float = 0.55) -> None:
+        await asyncio.sleep(random.uniform(min_seconds, max_seconds))
+
+    async def _move_and_click_locator(loc: Any) -> bool:
+        try:
+            await loc.scroll_into_view_if_needed(timeout=2000)
+        except Exception:
+            pass
+        try:
+            box = await loc.bounding_box(timeout=1500)
+        except TypeError:
+            box = await loc.bounding_box()
+        except Exception:
+            box = None
+        if not box:
+            try:
+                await loc.click(timeout=2500)
+                return True
+            except Exception:
+                return False
+        width = max(1.0, float(box.get("width") or 1.0))
+        height = max(1.0, float(box.get("height") or 1.0))
+        x = float(box.get("x") or 0.0) + random.uniform(width * 0.25, width * 0.75)
+        y = float(box.get("y") or 0.0) + random.uniform(height * 0.30, height * 0.70)
+        try:
+            await page.mouse.move(
+                x + random.uniform(-35, 35),
+                y + random.uniform(-18, 18),
+                steps=random.randint(4, 8),
+            )
+            await _human_pause(0.08, 0.25)
+            await page.mouse.move(x, y, steps=random.randint(3, 6))
+            await _human_pause(0.05, 0.18)
+            await page.mouse.down()
+            await _human_pause(0.04, 0.12)
+            await page.mouse.up()
+            out["real_mouse"] = True
+            return True
+        except Exception:
+            try:
+                await loc.click(timeout=2500)
+                return True
+            except Exception:
+                return False
+
+    async def _click_mode(label: str) -> bool:
+        patterns = [
+            f"button:has-text('{label}')",
+            f"[role='button']:has-text('{label}')",
+            f"a[role='tab']:has-text('{label}')",
+            f"[role='tab']:has-text('{label}')",
+            f"a:has-text('{label}')",
+            f"[aria-label='{label}']",
+            f"text={label}",
+        ]
+        for selector in patterns:
+            try:
+                loc = page.locator(selector).first
+                if await loc.is_visible(timeout=1200):
+                    return await _move_and_click_locator(loc)
+            except Exception:
+                continue
+        return False
+
+    out["attempted"] = True
+    try:
+        try:
+            await page.bring_to_front()
+        except Exception:
+            pass
+        try:
+            await page.mouse.wheel(0, random.randint(80, 180))
+            await _human_pause(0.2, 0.45)
+            await page.mouse.wheel(0, -random.randint(40, 120))
+            await _human_pause(0.2, 0.45)
+        except Exception:
+            pass
+        out["image_clicked"] = await _click_mode("Image")
+        if out["image_clicked"]:
+            await _human_pause(0.7, 1.35)
+        out["video_clicked"] = await _click_mode("Video")
+        try:
+            viewport = page.viewport_size or {}
+            width = int(viewport.get("width") or 1200)
+            height = int(viewport.get("height") or 800)
+            await _human_pause(0.25, 0.65)
+            await page.mouse.move(
+                random.randint(max(1, width // 5), max(2, width * 4 // 5)),
+                random.randint(max(1, height // 4), max(2, height * 3 // 4)),
+                steps=random.randint(5, 10),
+            )
+        except Exception:
+            pass
+        append_log(
+            log_file,
+            "[leonardo] keepalive ui toggle "
+            f"image_clicked={bool(out['image_clicked'])} "
+            f"video_clicked={bool(out['video_clicked'])} "
+            f"real_mouse={bool(out['real_mouse'])}",
+        )
+    except Exception as exc:
+        out["skipped_reason"] = f"ui_toggle_failed: {safe_trim(str(exc), 160)}"
+        append_log(log_file, f"[leonardo] keepalive ui toggle skipped: {out['skipped_reason']}")
+    return out
+
+
+async def _leonardo_refresh_page_like_user(page: Any, *, log_file: Path) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "attempted": False,
+        "reloaded": False,
+        "skipped_reason": "",
+        "page_url": "",
+    }
+    blocked_reason = await _leonardo_page_block_reason(page, deep=True)
+    if blocked_reason:
+        out["skipped_reason"] = blocked_reason
+        return out
+    out["attempted"] = True
+    try:
+        try:
+            await page.bring_to_front()
+        except Exception:
+            pass
+        try:
+            viewport = page.viewport_size or {}
+            width = int(viewport.get("width") or 1200)
+            height = int(viewport.get("height") or 800)
+            await page.mouse.move(
+                random.randint(max(1, width // 4), max(2, width * 3 // 4)),
+                random.randint(max(1, height // 4), max(2, height * 3 // 4)),
+                steps=random.randint(5, 10),
+            )
+            await asyncio.sleep(random.uniform(0.25, 0.75))
+            await page.mouse.wheel(0, random.randint(60, 180))
+            await asyncio.sleep(random.uniform(0.2, 0.55))
+            await page.mouse.wheel(0, -random.randint(30, 120))
+            await asyncio.sleep(random.uniform(0.35, 0.9))
+        except Exception:
+            pass
+        await page.reload(wait_until="domcontentloaded", timeout=60_000)
+        await asyncio.sleep(random.uniform(1.2, 2.8))
+        out["reloaded"] = True
+        out["page_url"] = _one_str(getattr(page, "url", ""))
+        append_log(log_file, f"[leonardo] keepalive page refresh reloaded url={safe_trim(out['page_url'], 180)!r}")
+    except Exception as exc:
+        out["skipped_reason"] = f"reload_failed: {safe_trim(str(exc), 180)}"
+        append_log(log_file, f"[leonardo] keepalive page refresh skipped: {out['skipped_reason']}")
+    return out
+
+
+async def _leonardo_page_needs_manual_verification(page: Any) -> bool:
+    try:
+        challenge = page.locator(
+            "iframe[src*='challenges.cloudflare.com'], iframe[src*='turnstile']"
+        ).first
+        if await challenge.is_visible(timeout=800):
+            return True
+    except Exception:
+        pass
+    try:
+        body_text = await page.locator("body").inner_text(timeout=2500)
+    except Exception:
+        body_text = ""
+    lower = str(body_text or "").lower()
+    return any(
+        hint in lower
+        for hint in (
+            "captcha verification failed",
+            "verify you are a human",
+            "please verify you are a human",
+            "checking if the site connection is secure",
+            "just a moment",
+            "cf-ray",
+        )
     )
+
+
+async def _wait_for_leonardo_manual_verification_clear(
+    page: Any,
+    *,
+    log_file: Path,
+    stage: str,
+    timeout_seconds: float = 180.0,
+) -> bool:
+    if not await _leonardo_page_needs_manual_verification(page):
+        return True
+    try:
+        await page.bring_to_front()
+    except Exception:
+        pass
+    append_log(
+        log_file,
+        f"[leonardo] manual verification required; waiting for user action stage={stage} timeout={float(timeout_seconds):.0f}s",
+    )
+    deadline = time.monotonic() + max(5.0, float(timeout_seconds))
+    while time.monotonic() < deadline:
+        await asyncio.sleep(2.0)
+        try:
+            if page.is_closed():
+                return False
+        except Exception:
+            return False
+        for pattern in (r"continue", r"sign\s*in", r"log\s*in"):
+            try:
+                btn = page.get_by_role("button", name=re.compile(pattern, re.I)).first
+                if callable(btn):
+                    btn = btn()
+                if await btn.is_visible(timeout=500):
+                    try:
+                        disabled = await btn.is_disabled(timeout=500)
+                    except Exception:
+                        disabled = False
+                    if not disabled:
+                        append_log(log_file, f"[leonardo] manual verification cleared; login button enabled stage={stage}")
+                        return True
+            except Exception:
+                continue
+        if not await _leonardo_page_needs_manual_verification(page):
+            append_log(log_file, f"[leonardo] manual verification cleared stage={stage}")
+            return True
+    append_log(log_file, f"[leonardo] manual verification wait timed out stage={stage}")
+    return False
+
+
+async def _click_leonardo_button(page: Any, patterns: List[str], *, timeout_ms: int = 1500) -> bool:
+    for pattern in patterns:
+        try:
+            btn = page.get_by_role("button", name=re.compile(pattern, re.I)).first
+            if callable(btn):
+                btn = btn()
+            if await btn.is_visible(timeout=timeout_ms):
+                await btn.click(timeout=timeout_ms)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _human_click_locator(page: Any, loc: Any, *, timeout_ms: int = 5000) -> bool:
+    try:
+        await loc.scroll_into_view_if_needed(timeout=timeout_ms)
+    except Exception:
+        pass
+    try:
+        box = await loc.bounding_box(timeout=min(timeout_ms, 2000))
+    except TypeError:
+        box = await loc.bounding_box()
+    except Exception:
+        box = None
+    if box:
+        try:
+            width = max(1.0, float(box.get("width") or 1.0))
+            height = max(1.0, float(box.get("height") or 1.0))
+            x = float(box.get("x") or 0.0) + random.uniform(width * 0.30, width * 0.70)
+            y = float(box.get("y") or 0.0) + random.uniform(height * 0.35, height * 0.65)
+            await page.mouse.move(x + random.uniform(-25, 25), y + random.uniform(-12, 12), steps=random.randint(4, 8))
+            await asyncio.sleep(random.uniform(0.08, 0.22))
+            await page.mouse.move(x, y, steps=random.randint(3, 6))
+            await asyncio.sleep(random.uniform(0.04, 0.14))
+            await page.mouse.down()
+            await asyncio.sleep(random.uniform(0.04, 0.13))
+            await page.mouse.up()
+            return True
+        except Exception:
+            pass
+    try:
+        await loc.click(timeout=timeout_ms)
+        return True
+    except Exception:
+        return False
+
+
+async def _click_leonardo_button_when_ready(
+    page: Any,
+    patterns: List[str],
+    *,
+    timeout_ms: int = 10_000,
+    settle_seconds: float = 0.0,
+) -> bool:
+    deadline = time.monotonic() + max(1.0, float(timeout_ms) / 1000.0)
+    if settle_seconds > 0:
+        await asyncio.sleep(float(settle_seconds))
+    while time.monotonic() < deadline:
+        for pattern in patterns:
+            try:
+                btn = page.get_by_role("button", name=re.compile(pattern, re.I)).first
+                if callable(btn):
+                    btn = btn()
+                if not await btn.is_visible(timeout=700):
+                    continue
+                try:
+                    disabled = await btn.is_disabled(timeout=700)
+                except Exception:
+                    disabled = False
+                if disabled:
+                    continue
+                return await _human_click_locator(page, btn, timeout_ms=2500)
+            except Exception:
+                continue
+        await asyncio.sleep(0.35)
+    return False
+
+
+async def _fill_first_visible_input(page: Any, selectors: List[str], value: str, *, timeout_ms: int = 5000) -> bool:
+    for selector in selectors:
+        try:
+            loc = page.locator(selector).first
+            if callable(loc):
+                loc = loc()
+            if await loc.is_visible(timeout=timeout_ms):
+                await loc.fill(value, timeout=timeout_ms)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _wait_and_fill_leonardo_password(
+    page: Any,
+    password: str,
+    *,
+    timeout_seconds: float = 35.0,
+) -> bool:
+    selectors = [
+        "input[type='password']",
+        "input[name='password']",
+        "input[id*='password' i]",
+        "input[autocomplete='current-password']",
+        "input[placeholder*='password' i]",
+    ]
+    deadline = time.monotonic() + max(5.0, float(timeout_seconds))
+    while time.monotonic() < deadline:
+        for selector in selectors:
+            try:
+                loc = page.locator(selector).first
+                if callable(loc):
+                    loc = loc()
+                if await loc.is_visible(timeout=350):
+                    await loc.fill(password, timeout=3000)
+                    return True
+            except Exception:
+                continue
+        try:
+            if page.is_closed():
+                return False
+        except Exception:
+            return False
+        await asyncio.sleep(0.75)
+    return False
+
+
+async def leonardo_restart_and_login_mapping(
+    *,
+    ctx_row: Dict[str, Any],
+    headless: bool = False,
+    wait_after_open_seconds: float = 3.0,
+    log_file: Path = MONITOR_LOG_FILE,
+) -> Dict[str, Any]:
+    """Restart a Leonardo window and submit the normal email/password login form.
+
+    This deliberately does not solve Cloudflare/Turnstile. If manual
+    verification is detected, the window is left open and the result says so.
+    """
+    vendor = _one_str(ctx_row.get("vendor") or ctx_row.get("browser_vendor") or "roxy") or "roxy"
+    base_url = _one_str(ctx_row.get("lan_addr") or ctx_row.get("browser_base_url"))
+    access_key = ctx_row.get("access_key") if ctx_row.get("access_key") is not None else ctx_row.get("browser_access_key")
+    space_id = _one_str(ctx_row.get("space_id"))
+    window_key = _one_str(ctx_row.get("window_key"))
+    username = _one_str(ctx_row.get("platform_username") or ctx_row.get("platform_account"))
+    password = _one_str(ctx_row.get("platform_password"))
+    pure_mode = bool(ctx_row.get("pure_mode")) if ctx_row.get("pure_mode") is not None else True
+
+    out: Dict[str, Any] = {
+        "success": False,
+        "window_key": window_key,
+        "closed": False,
+        "reopened": False,
+        "login_attempted": False,
+        "login_submitted": False,
+        "already_logged_in": False,
+        "preflight_inconclusive": False,
+        "manual_verification_required": False,
+        "missing_credentials": False,
+        "video_clicked": False,
+        "balance": {},
+        "page_url": "",
+        "title": "",
+        "ui_state": {},
+        "errors": [],
+    }
+    if not base_url or not space_id or not window_key:
+        out["errors"].append("mapping missing lan_addr/space_id/window_key")
+        return out
+
+    client = FPBrowserClient()
+    try:
+        preflight = await leonardo_keepalive(
+            browser_vendor=vendor,
+            browser_base_url=base_url,
+            browser_access_key=access_key,
+            space_id=space_id,
+            window_key=window_key,
+            target_url=DEFAULT_LEONARDO_TARGET,
+            headless=bool(headless),
+            pure_mode=bool(pure_mode),
+            probe_graphql=False,
+            active_auth_capture=False,
+            session_ping_enabled=False,
+            ui_mode_toggle=False,
+            active_page_refresh=False,
+            disconnect_after=True,
+            log_file=log_file,
+        )
+    except Exception as exc:
+        preflight = {"ok": False, "session_state": "unknown", "reason": "probe_exception", "error": str(exc)}
+    out["preflight"] = preflight
+    preflight_state = _one_str((preflight or {}).get("session_state")).lower()
+    preflight_reason = _one_str((preflight or {}).get("reason")).lower()
+    if bool((preflight or {}).get("ok")) or preflight_state in {"online", "online_degraded"}:
+        out["success"] = True
+        out["already_logged_in"] = True
+        out["page_url"] = _one_str((preflight or {}).get("page_url"))
+        out["ui_state"] = (preflight or {}).get("ui_state") or {}
+        out["balance"] = (preflight or {}).get("balance") or {}
+        append_log(log_file, f"[leonardo] recovery cancelled by online preflight window_key={safe_trim(window_key, 12)}")
+        return out
+    if preflight_state == "manual_verification" or preflight_reason == "cloudflare_challenge":
+        out["manual_verification_required"] = True
+        out["page_url"] = _one_str((preflight or {}).get("page_url"))
+        out["ui_state"] = (preflight or {}).get("ui_state") or {}
+        return out
+    if preflight_state not in {"offline", ""} and preflight_reason not in {"window_not_open", "no_leonardo_page"}:
+        out["preflight_inconclusive"] = True
+        out["errors"].append(f"recovery cancelled because session state is inconclusive: {preflight_reason or preflight_state}")
+        append_log(
+            log_file,
+            f"[leonardo] recovery cancelled by inconclusive preflight window_key={safe_trim(window_key, 12)} "
+            f"state={preflight_state or 'unknown'} reason={preflight_reason or '-'}",
+        )
+        return out
+
+    try:
+        await client.browser_close(
+            vendor=vendor,
+            base_url=base_url,
+            access_key=access_key,
+            window_key=window_key,
+        )
+        out["closed"] = True
+    except Exception as exc:
+        out["errors"].append(f"browser_close failed: {safe_trim(str(exc), 180)}")
+
+    for _ in range(20):
+        try:
+            conn = await client.get_open_window_connection_info(
+                vendor=vendor,
+                base_url=base_url,
+                access_key=access_key,
+                window_key=window_key,
+            )
+            if not conn:
+                break
+        except Exception:
+            break
+        await asyncio.sleep(0.5)
+
+    raw_endpoint = ""
+    try:
+        rsp = await client.browser_open(
+            vendor=vendor,
+            base_url=base_url,
+            access_key=access_key,
+            space_id=space_id,
+            window_key=window_key,
+            args=[],
+            force_open=True,
+            headless=bool(headless),
+            pure_mode=bool(pure_mode),
+        )
+        if (rsp or {}).get("code") == 0:
+            out["reopened"] = True
+        data = (rsp or {}).get("data") or {}
+        raw_endpoint = _one_str(data.get("http") or data.get("ws"))
+        if not raw_endpoint:
+            out["errors"].append(f"browser_open failed: {safe_trim(str(rsp), 220)}")
+    except Exception as exc:
+        out["errors"].append(f"browser_open failed: {safe_trim(str(exc), 180)}")
+
+    if not raw_endpoint:
+        try:
+            conn = await client.get_open_window_connection_info(
+                vendor=vendor,
+                base_url=base_url,
+                access_key=access_key,
+                window_key=window_key,
+            )
+            raw_endpoint = _one_str((conn or {}).get("http") or (conn or {}).get("ws"))
+            if raw_endpoint:
+                out["reopened"] = True
+        except Exception as exc:
+            out["errors"].append(f"connection_info after open failed: {safe_trim(str(exc), 180)}")
+    if not raw_endpoint:
+        out["errors"].append("missing CDP endpoint after browser_open")
+        return out
+
+    try:
+        from playwright.async_api import async_playwright  # type: ignore
+
+        endpoint = normalize_cdp_endpoint(raw_endpoint, base_url=base_url)
+        if wait_after_open_seconds > 0:
+            await asyncio.sleep(float(wait_after_open_seconds))
+        async with async_playwright() as pw:
+            br = await pw.chromium.connect_over_cdp(endpoint)
+            try:
+                ctx = br.contexts[0] if br.contexts else await br.new_context()
+                pages = list(ctx.pages or [])
+                page = next((p for p in pages if "leonardo.ai" in _one_str(getattr(p, "url", ""))), None)
+                page = page or (pages[0] if pages else await ctx.new_page())
+                current_url = _one_str(getattr(page, "url", ""))
+                if "app.leonardo.ai" in current_url:
+                    restored_ui = await _leonardo_logged_in_ui_state(page)
+                    if restored_ui.get("status") == "unknown" and restored_ui.get("app_route"):
+                        await asyncio.sleep(3.0)
+                        restored_ui = await _leonardo_logged_in_ui_state(page)
+                    restored_auth = await _leonardo_auth_session_probe(page, timeout_seconds=10.0)
+                    out["ui_state"] = restored_ui
+                    out["restored_auth_session"] = restored_auth
+                    out["page_url"] = _one_str(restored_ui.get("page_url"))
+                    out["title"] = _one_str(restored_ui.get("title"))
+                    if restored_auth.get("authenticated") is True:
+                        out["already_logged_in"] = True
+                        out["success"] = True
+                        append_log(
+                            log_file,
+                            f"[leonardo] reopened window restored an online session window_key={safe_trim(window_key, 12)}",
+                        )
+                        return out
+                    if restored_ui.get("status") == "manual_verification":
+                        out["manual_verification_required"] = True
+                        return out
+                    if restored_auth.get("authenticated") is None and restored_ui.get("status") != "offline":
+                        out["preflight_inconclusive"] = True
+                        out["errors"].append("reopened app session probe is inconclusive; login navigation cancelled")
+                        return out
+                if "/auth/" not in current_url.lower():
+                    await page.goto(LEONARDO_LOGIN_URL, wait_until="domcontentloaded", timeout=45_000)
+                    await asyncio.sleep(2.0)
+
+                if await _leonardo_page_needs_manual_verification(page) and not await _wait_for_leonardo_manual_verification_clear(
+                    page, log_file=log_file, stage="after_login_page_load"
+                ):
+                    out["manual_verification_required"] = True
+                    return out
+
+                out["page_url"] = _one_str(getattr(page, "url", ""))
+                try:
+                    out["title"] = _one_str(await page.title())
+                except Exception:
+                    out["title"] = ""
+                loaded_ui = await _leonardo_logged_in_ui_state(page)
+                out["ui_state"] = loaded_ui
+                if loaded_ui.get("status") == "online":
+                    out["already_logged_in"] = True
+                    out["success"] = True
+                    return out
+
+                if not username or not password:
+                    out["missing_credentials"] = True
+                    out["errors"].append("missing Leonardo username/password for this mapping")
+                    return out
+
+                out["login_attempted"] = True
+                email_selectors = [
+                    "input[type='email']",
+                    "input[name='email']",
+                    "input[autocomplete='email']",
+                    "input[placeholder*='@']",
+                    "input[placeholder*='name']",
+                ]
+                email_filled = await _fill_first_visible_input(
+                    page,
+                    email_selectors,
+                    username,
+                    timeout_ms=1200,
+                )
+                if not email_filled:
+                    clicked_email = await _click_leonardo_button_when_ready(
+                        page,
+                        [r"continue\s+with\s+email", r"use\s+email", r"email"],
+                        timeout_ms=12_000,
+                        settle_seconds=0.8,
+                    )
+                    if not clicked_email:
+                        out["errors"].append("email login entry not ready")
+                    await asyncio.sleep(0.8)
+
+                if await _leonardo_page_needs_manual_verification(page) and not await _wait_for_leonardo_manual_verification_clear(
+                    page, log_file=log_file, stage="after_continue_with_email"
+                ):
+                    out["manual_verification_required"] = True
+                    return out
+
+                if not email_filled:
+                    email_filled = await _fill_first_visible_input(
+                        page,
+                        email_selectors,
+                        username,
+                        timeout_ms=7000,
+                    )
+                if email_filled:
+                    clicked_continue = await _click_leonardo_button_when_ready(
+                        page,
+                        [r"continue", r"next"],
+                        timeout_ms=16_000,
+                        settle_seconds=7.0,
+                    )
+                    if not clicked_continue:
+                        out["errors"].append("Continue button not ready after email")
+                        try:
+                            await page.keyboard.press("Enter")
+                        except Exception:
+                            pass
+                    await asyncio.sleep(1.2)
+                else:
+                    out["errors"].append("email input not found")
+
+                if await _leonardo_page_needs_manual_verification(page) and not await _wait_for_leonardo_manual_verification_clear(
+                    page, log_file=log_file, stage="after_email_continue"
+                ):
+                    out["manual_verification_required"] = True
+                    return out
+
+                password_filled = await _wait_and_fill_leonardo_password(
+                    page,
+                    password,
+                    timeout_seconds=35.0,
+                )
+                if not password_filled:
+                    if await _leonardo_page_needs_manual_verification(page) and not await _wait_for_leonardo_manual_verification_clear(
+                        page, log_file=log_file, stage="before_password_input"
+                    ):
+                        out["manual_verification_required"] = True
+                    else:
+                        out["errors"].append(
+                            f"password input not found after waiting; url={safe_trim(_one_str(getattr(page, 'url', '')), 160)}"
+                        )
+                    return out
+
+                if await _leonardo_page_needs_manual_verification(page) and not await _wait_for_leonardo_manual_verification_clear(
+                    page, log_file=log_file, stage="after_password_input"
+                ):
+                    out["manual_verification_required"] = True
+                    return out
+
+                clicked = await _click_leonardo_button(
+                    page,
+                    [r"log\s*in", r"sign\s*in", r"continue"],
+                    timeout_ms=1500,
+                )
+                if not clicked:
+                    clicked = await _click_leonardo_button_when_ready(
+                        page,
+                        [r"log\s*in", r"sign\s*in"],
+                        timeout_ms=18_000,
+                        settle_seconds=5.0,
+                    )
+                if not clicked:
+                    try:
+                        await page.keyboard.press("Enter")
+                        clicked = True
+                    except Exception as exc:
+                        out["errors"].append(f"submit login failed: {safe_trim(str(exc), 180)}")
+                out["login_submitted"] = bool(clicked)
+                await asyncio.sleep(5.0)
+                if await _leonardo_page_needs_manual_verification(page) and not await _wait_for_leonardo_manual_verification_clear(
+                    page, log_file=log_file, stage="after_sign_in"
+                ):
+                    out["manual_verification_required"] = True
+
+                try:
+                    await page.wait_for_url(
+                        re.compile(r"https://app\.leonardo\.ai/(?!auth/)"),
+                        timeout=30_000,
+                    )
+                except Exception:
+                    pass
+                if not bool(out["manual_verification_required"]):
+                    final_ui = await _leonardo_logged_in_ui_state(page)
+                    if final_ui.get("status") == "unknown" and final_ui.get("app_route"):
+                        await asyncio.sleep(5.0)
+                        final_ui = await _leonardo_logged_in_ui_state(page)
+                    final_auth = await _leonardo_auth_session_probe(page, timeout_seconds=10.0)
+                    out["ui_state"] = final_ui
+                    out["auth_session"] = final_auth
+                    if final_ui.get("status") == "manual_verification":
+                        out["manual_verification_required"] = True
+                    elif final_auth.get("authenticated") is not True:
+                        out["errors"].append(
+                            f"login did not establish a server session: authenticated={final_auth.get('authenticated')} "
+                            f"status={final_auth.get('status')}"
+                        )
+                    elif final_ui.get("status") != "online":
+                        out["errors"].append(
+                            f"login did not reach confirmed app UI: state={final_ui.get('status') or 'unknown'} "
+                            f"url={safe_trim(str(final_ui.get('page_url') or ''), 160)}"
+                        )
+
+                out["page_url"] = _one_str(getattr(page, "url", ""))
+                try:
+                    out["title"] = _one_str(await page.title())
+                except Exception:
+                    out["title"] = ""
+                out["success"] = (
+                    bool(out["login_submitted"])
+                    and not bool(out["manual_verification_required"])
+                    and (out.get("auth_session") or {}).get("authenticated") is True
+                )
+                append_log(
+                    log_file,
+                    "[leonardo] restart login flow finished "
+                    f"window_key={safe_trim(window_key, 12)} "
+                    f"success={out['success']} video_clicked={bool(out['video_clicked'])} "
+                    f"balance={safe_trim(str(out.get('balance') or {}), 160)}",
+                )
+            finally:
+                try:
+                    await br.close()
+                except Exception:
+                    pass
+    except Exception as exc:
+        out["errors"].append(f"restart login failed: {safe_trim(str(exc), 220)}")
+
+    return out
 
 
 async def leonardo_keepalive(
@@ -639,9 +1669,16 @@ async def leonardo_keepalive(
     auth_cache_seconds: float = LEONARDO_DEFAULT_AUTH_CACHE_SECONDS,
     auth_capture_timeout_seconds: float = 20.0,
     probe_graphql: bool = True,
+    active_auth_capture: bool = False,
+    auth_session_probe_enabled: bool = True,
+    session_ping_enabled: bool = True,
+    cf_refresh_ttl_seconds: float = LEONARDO_DEFAULT_CF_REFRESH_TTL_SECONDS,
+    ui_mode_toggle: bool = False,
+    active_page_refresh: bool = False,
+    disconnect_after: bool = True,
     log_file: Path = MONITOR_LOG_FILE,
 ) -> Dict[str, Any]:
-    """Warm the Leonardo page/session without submitting a generation."""
+    """Observe and gently warm a Leonardo session without navigating the app."""
     sess = get_or_create_playwright_ctx(
         vendor=browser_vendor,
         base_url=browser_base_url,
@@ -650,151 +1687,230 @@ async def leonardo_keepalive(
         window_key=window_key,
     )
     target = _one_str(target_url) or DEFAULT_LEONARDO_TARGET
-    async with sess.driver_lock:
-        try:
-            conn = await sess.fp_client.get_open_window_connection_info(
-                vendor=browser_vendor,
-                base_url=browser_base_url,
-                access_key=browser_access_key,
-                window_key=window_key,
-            )
-        except Exception as exc:
-            append_log(log_file, f"[leonardo] keepalive connection check failed: {safe_trim(str(exc), 200)}")
-            conn = None
-        if not conn:
-            append_log(log_file, "[leonardo] keepalive skipped: fingerprint window is not open")
-            return {
-                "ok": False,
-                "reason": "window_not_open",
-                "target_url": target,
-                "auth_cached": False,
-                "auth_cache_seconds": float(auth_cache_seconds),
-            }
-        await sess.ensure_open(
-            args=[],
-            force_open=False,
-            headless=headless,
-            require_page=False,
-            pure_mode=pure_mode,
-        )
-        page = await _find_or_open_leonardo_page(
-            sess,
-            target,
-            log_file=log_file,
-            allow_new_page=False,
-            navigate_if_needed=False,
-            bring_to_front=False,
-        )
-        if page is None:
-            append_log(log_file, "[leonardo] keepalive skipped: no existing Leonardo app page")
-            return {
-                "ok": False,
-                "reason": "no_leonardo_page",
-                "target_url": target,
-                "auth_cached": False,
-                "auth_cache_seconds": float(auth_cache_seconds),
-            }
-        blocked_reason = await _leonardo_page_block_reason(page, deep=True)
-        if blocked_reason:
-            page_url = _one_str(getattr(page, "url", ""))
-            append_log(
-                log_file,
-                f"[leonardo] keepalive skipped: reason={blocked_reason} url={safe_trim(page_url, 180)!r}",
-            )
-            return {
-                "ok": False,
-                "reason": blocked_reason,
-                "target_url": target,
-                "page_url": page_url,
-                "auth_cached": False,
-                "auth_cache_seconds": float(auth_cache_seconds),
-            }
-        try:
-            ping_info = await _leonardo_session_ping(page, log_file=log_file)
-        except NonPenalizedTaskError as exc:
-            status = getattr(exc, "status_code", None)
-            reason = "login_required" if status == 401 else "session_ping_failed"
-            append_log(
-                log_file,
-                f"[leonardo] keepalive session ping skipped: reason={reason} err={safe_trim(str(exc), 240)}",
-            )
-            return {
-                "ok": False,
-                "reason": reason,
-                "target_url": target,
-                "page_url": _one_str(getattr(page, "url", "")),
-                "auth_cached": False,
-                "auth_cache_seconds": float(auth_cache_seconds),
-            }
-        except Exception as exc:
-            append_log(log_file, f"[leonardo] keepalive session ping skipped: {safe_trim(str(exc), 240)}")
-            return {
-                "ok": False,
-                "reason": "session_ping_failed",
-                "target_url": target,
-                "page_url": _one_str(getattr(page, "url", "")),
-                "auth_cached": False,
-                "auth_cache_seconds": float(auth_cache_seconds),
-            }
-        headers: Dict[str, str] = {}
-        try:
-            headers = await _capture_graphql_headers(
-                page,
-                target_url=target,
-                cache_key=sess.cache_key,
-                log_file=log_file,
-                timeout_seconds=auth_capture_timeout_seconds,
-                cache_seconds=auth_cache_seconds,
-                navigate=False,
-            )
-        except NonPenalizedTaskError as exc:
-            append_log(log_file, f"[leonardo] keepalive auth capture skipped: {safe_trim(str(exc), 240)}")
-        balance_info: Dict[str, Any] = {}
-        if probe_graphql and headers.get("Authorization"):
+    result: Dict[str, Any]
+    try:
+        async with sess.driver_lock:
             try:
-                obj = await _leonardo_graphql(
-                    page,
-                    auth_headers=headers,
-                    operation_name="GetUserTokensFromSub",
-                    query=LEONARDO_USER_TOKENS_QUERY,
-                    variables={},
-                    log_file=log_file,
+                conn = await sess.fp_client.get_open_window_connection_info(
+                    vendor=browser_vendor,
+                    base_url=browser_base_url,
+                    access_key=browser_access_key,
+                    window_key=window_key,
                 )
-                balance_info = _leonardo_token_balance_from_graphql(obj)
-            except NonPenalizedTaskError as exc:
-                status = getattr(exc, "status_code", None)
-                reason = "login_required" if status == 401 else "graphql_probe_failed"
+            except Exception as exc:
+                append_log(log_file, f"[leonardo] keepalive connection check failed: {safe_trim(str(exc), 200)}")
+                conn = None
+            if not conn:
+                append_log(log_file, "[leonardo] keepalive skipped: fingerprint window is not open")
+                return {
+                    "ok": False,
+                    "reason": "window_not_open",
+                    "target_url": target,
+                    "auth_cached": False,
+                    "auth_cache_seconds": float(auth_cache_seconds),
+                }
+            await sess.ensure_open(
+                args=[],
+                force_open=False,
+                headless=headless,
+                require_page=False,
+                pure_mode=pure_mode,
+            )
+            page = await _find_or_open_leonardo_page(
+                sess,
+                target,
+                log_file=log_file,
+                allow_new_page=False,
+                navigate_if_needed=False,
+                bring_to_front=False,
+            )
+            if page is None:
+                append_log(log_file, "[leonardo] keepalive skipped: no existing Leonardo app page")
+                return {
+                    "ok": False,
+                    "reason": "no_leonardo_page",
+                    "target_url": target,
+                    "auth_cached": False,
+                    "auth_cache_seconds": float(auth_cache_seconds),
+                }
+            ui_state = await _leonardo_logged_in_ui_state(page)
+            ui_status = _one_str(ui_state.get("status")).lower() or "unknown"
+            if ui_status == "manual_verification":
                 append_log(
                     log_file,
-                    f"[leonardo] keepalive graphql probe skipped: reason={reason} err={safe_trim(str(exc), 240)}",
+                    f"[leonardo] keepalive waiting for manual verification: url={safe_trim(str(ui_state.get('page_url') or ''), 180)!r}",
                 )
                 return {
                     "ok": False,
-                    "reason": reason,
+                    "session_state": "manual_verification",
+                    "reason": "cloudflare_challenge",
                     "target_url": target,
-                    "page_url": _one_str(getattr(page, "url", "")),
-                    "auth_cached": bool(headers.get("Authorization")),
+                    "page_url": ui_state.get("page_url"),
+                    "ui_state": ui_state,
+                    "auth_cached": False,
                     "auth_cache_seconds": float(auth_cache_seconds),
                 }
-            except Exception as exc:
-                append_log(log_file, f"[leonardo] keepalive graphql probe skipped: {safe_trim(str(exc), 240)}")
+            cookie_before = await _leonardo_cookie_session_state(page)
+            append_log(log_file, f"[leonardo] keepalive cookie state: {_leonardo_cookie_state_summary(cookie_before)}")
+            cookie_state = cookie_before
+            if auth_session_probe_enabled:
+                auth_session = await _leonardo_auth_session_probe(page, timeout_seconds=10.0)
+            else:
+                auth_session = {"authenticated": None, "authoritative": False, "status": 0, "skipped": True}
+            authenticated = auth_session.get("authenticated")
+            append_log(
+                log_file,
+                f"[leonardo] keepalive auth session: authenticated={authenticated} status={auth_session.get('status')}",
+            )
+            ping_info: Dict[str, Any] = {"ok": False, "skipped": True, "reason": "not_due"}
+            try:
+                cf_ttl = cookie_before.get("cf_access_token_ttl_seconds")
+                should_ping = (
+                    bool(session_ping_enabled)
+                    and authenticated is True
+                    and cf_ttl is not None
+                    and float(cf_refresh_ttl_seconds) >= 0
+                    and float(cf_ttl) <= float(cf_refresh_ttl_seconds)
+                )
+            except Exception:
+                should_ping = False
+            degraded_reasons: List[str] = []
+            if authenticated is None:
+                degraded_reasons.append("auth_session_unavailable")
+            if should_ping:
+                try:
+                    ping_info = await _leonardo_session_ping(page, log_file=log_file)
+                    append_log(log_file, f"[leonardo] keepalive conditional session touch status={ping_info.get('status')}")
+                    cookie_after = await _leonardo_cookie_session_state(page)
+                    if cookie_after.get("cookies_checked"):
+                        cookie_state = cookie_after
+                    if not bool(ping_info.get("ok")):
+                        degraded_reasons.append("session_touch_failed")
+                except Exception as exc:
+                    ping_info = {"ok": False, "error": safe_trim(str(exc), 180)}
+                    degraded_reasons.append("session_touch_failed")
+                    append_log(log_file, f"[leonardo] keepalive session touch deferred: {safe_trim(str(exc), 240)}")
+
+            ui_activity: Dict[str, Any] = {}
+            if ui_mode_toggle:
+                ui_activity = await _leonardo_click_creation_mode_toggle(page, log_file=log_file)
+            page_refresh: Dict[str, Any] = {}
+            if active_page_refresh:
+                page_refresh = await _leonardo_refresh_page_like_user(page, log_file=log_file)
+
+            headers: Dict[str, str] = {}
+            auth_capture_error = ""
+            if probe_graphql:
+                headers = _cached_leonardo_auth_headers(sess.cache_key)
+            if probe_graphql and not headers.get("Authorization") and active_auth_capture:
+                try:
+                    headers = await _capture_graphql_headers(
+                        page,
+                        target_url=target,
+                        cache_key=sess.cache_key,
+                        log_file=log_file,
+                        timeout_seconds=min(float(auth_capture_timeout_seconds), 5.0),
+                        cache_seconds=auth_cache_seconds,
+                        navigate=False,
+                    )
+                except NonPenalizedTaskError as exc:
+                    auth_capture_error = safe_trim(str(exc), 240)
+                    append_log(log_file, f"[leonardo] keepalive auth capture idle: {auth_capture_error}")
+                except Exception as exc:
+                    auth_capture_error = safe_trim(str(exc), 240)
+            balance_info: Dict[str, Any] = {}
+            graphql_unauthorized = False
+            if probe_graphql and headers.get("Authorization"):
+                try:
+                    obj = await _leonardo_graphql(
+                        page,
+                        auth_headers=headers,
+                        operation_name="GetUserTokensFromSub",
+                        query=LEONARDO_USER_TOKENS_QUERY,
+                        variables={},
+                        log_file=log_file,
+                    )
+                    balance_info = _leonardo_token_balance_from_graphql(obj)
+                except NonPenalizedTaskError as exc:
+                    status = getattr(exc, "status_code", None)
+                    graphql_unauthorized = status == 401
+                    if graphql_unauthorized:
+                        drop_leonardo_auth_cache(sess.cache_key)
+                    degraded_reasons.append("graphql_unauthorized" if graphql_unauthorized else "graphql_probe_failed")
+                    append_log(
+                        log_file,
+                        f"[leonardo] keepalive graphql probe deferred: err={safe_trim(str(exc), 240)}",
+                    )
+                except Exception as exc:
+                    degraded_reasons.append("graphql_probe_failed")
+                    append_log(log_file, f"[leonardo] keepalive graphql probe skipped: {safe_trim(str(exc), 240)}")
+            elif probe_graphql:
+                auth_capture_error = auth_capture_error or "no cached authorization"
+                append_log(
+                    log_file,
+                    f"[leonardo] keepalive GraphQL probe deferred; no cached authorization: {auth_capture_error}",
+                )
+
+            ui_after = await _leonardo_logged_in_ui_state(page)
+            final_ui = ui_after if ui_after.get("checked") else ui_state
+            final_status = _one_str(final_ui.get("status")).lower() or "unknown"
+            common = {
+                "target_url": target,
+                "page_url": final_ui.get("page_url") or _one_str(getattr(page, "url", "")),
+                "session_ping": ping_info,
+                "auth_cached": bool(headers.get("Authorization")) and not graphql_unauthorized,
+                "auth_cache_seconds": float(auth_cache_seconds),
+                "cookie_state": cookie_state,
+                "auth_session": auth_session,
+                "ui_state": final_ui,
+                **({"ui_activity": ui_activity} if ui_activity else {}),
+                **({"page_refresh": page_refresh} if page_refresh else {}),
+                **({"balance": balance_info} if balance_info else {}),
+            }
+            if final_status == "manual_verification":
+                return {"ok": False, "session_state": "manual_verification", "reason": "cloudflare_challenge", **common}
+            if authenticated is False:
                 return {
                     "ok": False,
-                    "reason": "graphql_probe_failed",
-                    "target_url": target,
-                    "page_url": _one_str(getattr(page, "url", "")),
-                    "auth_cached": bool(headers.get("Authorization")),
-                    "auth_cache_seconds": float(auth_cache_seconds),
+                    "session_state": "offline",
+                    "reason": "session_missing",
+                    "offline_evidence": "get_session_empty_or_unauthorized",
+                    **common,
                 }
-    return {
-        "ok": True,
-        "target_url": target,
-        "page_url": _one_str(getattr(page, "url", "")),
-        "session_ping": ping_info,
-        "auth_cached": bool(headers.get("Authorization")),
-        "auth_cache_seconds": float(auth_cache_seconds),
-        **({"balance": balance_info} if balance_info else {}),
-    }
+            if final_status == "offline":
+                return {
+                    "ok": False,
+                    "session_state": "offline",
+                    "reason": "login_required",
+                    "offline_evidence": "auth_route_without_logged_in_ui",
+                    **common,
+                }
+            if authenticated is True or final_status == "online" or balance_info:
+                if authenticated is True and final_status != "online":
+                    degraded_reasons.append("app_ui_inconclusive")
+                session_state = "online_degraded" if degraded_reasons else "online"
+                return {
+                    "ok": True,
+                    "session_state": session_state,
+                    "reason": degraded_reasons[0] if degraded_reasons else "",
+                    "degraded_reasons": degraded_reasons,
+                    **common,
+                }
+            reason = "graphql_unauthorized" if graphql_unauthorized else "ui_state_unknown"
+            return {
+                "ok": False,
+                "session_state": "unknown",
+                "reason": reason,
+                "degraded_reasons": degraded_reasons,
+                **common,
+            }
+    finally:
+        if disconnect_after:
+            try:
+                await sess.disconnect_playwright_only()
+                append_log(log_file, "[leonardo] keepalive disconnected local CDP")
+            except Exception as exc:
+                append_log(log_file, f"[leonardo] keepalive disconnect skipped: {safe_trim(str(exc), 180)}")
 
 
 async def leonardo_fetch_token_balance(
@@ -822,26 +1938,63 @@ async def leonardo_fetch_token_balance(
     target = _one_str(target_url) or DEFAULT_LEONARDO_TARGET
     async with sess.driver_lock:
         await sess.ensure_open(
-            args=[target],
+            args=[],
             force_open=False,
             headless=headless,
             require_page=False,
             pure_mode=pure_mode,
         )
-        page = await _find_or_open_leonardo_page(sess, target, log_file=log_file)
+        page = await _find_or_open_leonardo_page(
+            sess,
+            target,
+            log_file=log_file,
+            allow_new_page=False,
+            navigate_if_needed=False,
+            bring_to_front=False,
+        )
         if page is None:
             raise NonPenalizedTaskError(
-                "Leonardo page is not open; please open app.leonardo.ai in the fingerprint browser first.",
+                "Leonardo page is not open; please open app.leonardo.ai and log in before refreshing tokens.",
                 status_code=401,
             )
-        auth_headers = await _capture_graphql_headers(
-            page,
-            target_url=target,
-            cache_key=sess.cache_key,
-            log_file=log_file,
-            timeout_seconds=auth_capture_timeout_seconds,
-            cache_seconds=auth_cache_seconds,
-        )
+        await _raise_if_leonardo_page_blocked(page, stage="before_token_balance_refresh")
+        try:
+            auth_headers = await _capture_graphql_headers(
+                page,
+                target_url=target,
+                cache_key=sess.cache_key,
+                log_file=log_file,
+                timeout_seconds=auth_capture_timeout_seconds,
+                cache_seconds=auth_cache_seconds,
+                navigate=False,
+            )
+        except NonPenalizedTaskError as exc:
+            msg = str(exc)
+            if "auth header capture timed out" not in msg:
+                raise
+            cookie_state = await _leonardo_cookie_session_state(page)
+            append_log(
+                log_file,
+                f"[leonardo] token refresh auth capture idle; cookie state before fallback: {_leonardo_cookie_state_summary(cookie_state)}",
+            )
+            auth_session = await _leonardo_auth_session_probe(page, timeout_seconds=10.0)
+            if auth_session.get("authenticated") is False:
+                raise NonPenalizedTaskError(
+                    "Leonardo account is logged out; token balance cannot be refreshed.",
+                    status_code=401,
+                )
+            if auth_session.get("authenticated") is not True:
+                raise
+            await _raise_if_leonardo_page_blocked(page, stage="before_token_balance_refresh_fallback")
+            auth_headers = await _capture_graphql_headers(
+                page,
+                target_url=target,
+                cache_key=sess.cache_key,
+                log_file=log_file,
+                timeout_seconds=auth_capture_timeout_seconds,
+                cache_seconds=auth_cache_seconds,
+                navigate=True,
+            )
         obj = await _leonardo_graphql(
             page,
             auth_headers=auth_headers,

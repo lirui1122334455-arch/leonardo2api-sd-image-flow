@@ -79,6 +79,7 @@ _DREAMINA_REGION = "US"
 _DREAMINA_WEB_VERSION = "7.5.0"
 _DREAMINA_DA_VERSION = "3.3.9"
 _DREAMINA_DRAFT_VERSION = "3.3.17"
+_DREAMINA_REQUEST_DA_VERSION = "3.3.20"
 _APPVR = "8.4.0"
 _DREAMINA_DRAFT_MIN_VERSION = "3.0.5"
 _DREAMINA_AIGC_FEATURES = "app_lip_sync"
@@ -125,10 +126,20 @@ _SEEDANCE_BENEFIT_MINI_OUTPUT = "seedance_20_mini_720p_output"
 _SEEDANCE_BENEFIT_PRO_OUTPUT = "seedance_20_pro_720p_output"
 _SEEDANCE_BENEFIT_PRO_DEFAULT = "dreamina_video_seedance_20_pro"
 _SEEDANCE_BENEFIT_PRO_WITH_VIDEO = "dreamina_video_seedance_20_video_add"
-
 _DREAMINA_COMMERCE_BASE = "https://commerce.us.capcut.com"
 _DREAMINA_COMMERCE_BASE_CA = "https://commerce-api-sg.capcut.com"
 _DREAMINA_MIN_CREDIT = 255;#最小的dreamina积分才启动
+
+_DREAMINA_DIRECT_HTTP_RETRY_EXC = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadError,
+    httpx.ReadTimeout,
+    httpx.WriteError,
+    httpx.WriteTimeout,
+    httpx.RemoteProtocolError,
+    httpx.PoolTimeout,
+)
 _DREAMINA_GIFT_CREDIT = 120;
 
 _DREAMINA_SESSIONS: Dict[str, "DreaminaSession"] = {}
@@ -159,6 +170,71 @@ def _dreamina_bool(v: Any) -> bool:
 
 def _compact_json(v: Any) -> str:
     return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+
+
+def _dreamina_commerce_debug_from_body(body: Dict[str, Any]) -> List[Dict[str, Any]]:
+    ext = body.get("extend") if isinstance(body.get("extend"), dict) else {}
+    items = (ext or {}).get("m_video_commerce_info_list")
+    if not isinstance(items, list) or not items:
+        info = (ext or {}).get("m_video_commerce_info")
+        items = [info] if isinstance(info, dict) else []
+    out: List[Dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        row = {
+            "benefit_type": _one_str(item.get("benefit_type")),
+            "resource_id": _one_str(item.get("resource_id")),
+        }
+        if item.get("amount") is not None:
+            row["amount"] = item.get("amount")
+        out.append(row)
+    return out
+
+
+def _dreamina_commerce_primary_debug_from_body(body: Dict[str, Any]) -> Dict[str, Any]:
+    ext = body.get("extend") if isinstance(body.get("extend"), dict) else {}
+    info = ext.get("m_video_commerce_info") if isinstance(ext.get("m_video_commerce_info"), dict) else {}
+    row = {
+        "benefit_type": _one_str((info or {}).get("benefit_type")),
+        "resource_id": _one_str((info or {}).get("resource_id")),
+    }
+    if (info or {}).get("amount") is not None:
+        row["amount"] = (info or {}).get("amount")
+    return row
+
+
+def _dreamina_commerce_retry_body(body: Dict[str, Any], mode: str) -> Dict[str, Any]:
+    retry_body = json.loads(json.dumps(body, ensure_ascii=False))
+    ext = retry_body.get("extend") if isinstance(retry_body.get("extend"), dict) else {}
+    items = ext.get("m_video_commerce_info_list")
+    if not isinstance(items, list):
+        items = []
+
+    if mode == "output_primary":
+        if items:
+            ext["m_video_commerce_info"] = dict(items[-1])
+        return retry_body
+
+    targets: List[Dict[str, Any]] = []
+    primary = ext.get("m_video_commerce_info")
+    if isinstance(primary, dict):
+        targets.append(primary)
+    targets.extend([x for x in items if isinstance(x, dict)])
+
+    for info in targets:
+        if mode in ("zero_amount", "octo_zero"):
+            info["amount"] = 0
+        if mode == "octo_zero":
+            benefit_type = _one_str(info.get("benefit_type"))
+            if benefit_type and not benefit_type.endswith("_octo"):
+                info["benefit_type"] = f"{benefit_type}_octo"
+            if _one_str(info.get("resource_id")) == "generate_video":
+                info["resource_id"] = "generate_video_octo"
+
+    if items:
+        ext["m_video_commerce_info"] = dict(items[0])
+    return retry_body
 
 
 def _drop_dreamina_session(cache_key: str) -> None:
@@ -1051,6 +1127,8 @@ def _dreamina_bind_prompt_materials(
     parts: List[Dict[str, str]],
     subject_refs: List[Dict[str, Any]],
     external_refs: List[Dict[str, Any]],
+    video_refs: Optional[List[Dict[str, Any]]] = None,
+    audio_refs: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
     """把 prompt token 序列绑定到内部/外部图片，并生成 prompt/material/meta 结果。
 
@@ -1062,6 +1140,8 @@ def _dreamina_bind_prompt_materials(
     """
     subject_iter = iter(subject_refs or [])
     external_remaining = list(external_refs or [])
+    video_remaining = list(video_refs or [])
+    audio_remaining = list(audio_refs or [])
     material_list: List[Dict[str, Any]] = []
     meta_list: List[Dict[str, Any]] = []
     material_kinds: List[str] = []
@@ -1074,13 +1154,17 @@ def _dreamina_bind_prompt_materials(
             return ""
         return os.path.splitext(s)[0] or s
 
-    def ref_token_keys(ref: Dict[str, Any]) -> set[str]:
+    def ref_token_keys(ref: Dict[str, Any], *, url_keys: Tuple[str, ...]) -> set[str]:
         keys: set[str] = set()
         for key in ("alias", "field_name", "subject_name", "name", "filename"):
             norm = normalize_token(ref.get(key))
             if norm:
                 keys.add(norm)
-        src = _one_str(ref.get("source") or ref.get("url") or ref.get("image_url") or ref.get("imageUrl"))
+        src = ""
+        for key in url_keys:
+            src = _one_str(ref.get(key))
+            if src:
+                break
         if src:
             try:
                 filename = os.path.basename(urlsplit(src).path or src)
@@ -1092,15 +1176,64 @@ def _dreamina_bind_prompt_materials(
                     keys.add(norm)
         return keys
 
-    def pop_external_ref(token: str) -> Optional[Dict[str, Any]]:
-        if not external_remaining:
+    def pop_matched_ref(remaining: List[Dict[str, Any]], token: str, *, url_keys: Tuple[str, ...]) -> Optional[Dict[str, Any]]:
+        if not remaining:
             return None
         token_norm = normalize_token(token)
         if token_norm:
-            for idx, ref in enumerate(external_remaining):
-                if token_norm in ref_token_keys(ref):
-                    return external_remaining.pop(idx)
-        return external_remaining.pop(0)
+            for idx, ref in enumerate(remaining):
+                if token_norm in ref_token_keys(ref, url_keys=url_keys):
+                    return remaining.pop(idx)
+        return None
+
+    def next_text_after(index: int) -> str:
+        chunks: List[str] = []
+        for part in (parts or [])[index + 1:]:
+            ptype = _one_str(part.get("type"))
+            if ptype != "text":
+                break
+            text = _one_str(part.get("text"))
+            if text:
+                chunks.append(text)
+        return " ".join(chunks)
+
+    def pop_external_ref(token: str, hint: str = "") -> Tuple[str, Optional[Dict[str, Any]]]:
+        image = pop_matched_ref(
+            external_remaining,
+            token,
+            url_keys=("source", "url", "image_url", "imageUrl"),
+        )
+        if image is not None:
+            return "image", image
+        video = pop_matched_ref(
+            video_remaining,
+            token,
+            url_keys=("source", "url", "video_url", "videoUrl"),
+        )
+        if video is not None:
+            return "video", video
+        audio = pop_matched_ref(
+            audio_remaining,
+            token,
+            url_keys=("source", "url", "audio_url", "audioUrl"),
+        )
+        if audio is not None:
+            return "audio", audio
+
+        hint_text = f"{token} {hint}".lower()
+        wants_audio = any(x in hint_text for x in ("audio", "voice", "sound", "music", "bgm", "narration", "\u914d\u97f3", "\u97f3\u9891", "\u58f0\u97f3", "\u97f3\u4e50", "\u65c1\u767d", "\u5f00\u573a\u767d"))
+        wants_video = any(x in hint_text for x in ("video", "vid", "clip", "footage", "\u89c6\u9891", "\u5f71\u7247", "\u53c2\u8003\u89c6\u9891"))
+        if wants_audio and audio_remaining:
+            return "audio", audio_remaining.pop(0)
+        if wants_video and video_remaining:
+            return "video", video_remaining.pop(0)
+        if external_remaining:
+            return "image", external_remaining.pop(0)
+        if video_remaining:
+            return "video", video_remaining.pop(0)
+        if audio_remaining:
+            return "audio", audio_remaining.pop(0)
+        return "", None
 
     def append_image_material(ref: Dict[str, Any]) -> None:
         nonlocal image_idx
@@ -1121,11 +1254,33 @@ def _dreamina_bind_prompt_materials(
             "id": str(uuid.uuid4()),
             "meta_type": "image",
             "text": "",
-            "material_ref": {"material_idx": image_idx},
+            "material_ref": {"material_idx": len(material_list) - 1},
         })
         image_idx += 1
 
-    for part in parts or []:
+    def append_video_material(ref: Dict[str, Any]) -> None:
+        material_list.append(_dreamina_video_material(ref))
+        material_kinds.append("video")
+        meta_list.append({
+            "type": "",
+            "id": str(uuid.uuid4()),
+            "meta_type": "video",
+            "text": "",
+            "material_ref": {"material_idx": len(material_list) - 1},
+        })
+
+    def append_audio_material(ref: Dict[str, Any]) -> None:
+        material_list.append(_dreamina_audio_material(ref))
+        material_kinds.append("audio")
+        meta_list.append({
+            "type": "",
+            "id": str(uuid.uuid4()),
+            "meta_type": "audio",
+            "text": "",
+            "material_ref": {"material_idx": len(material_list) - 1},
+        })
+
+    for idx, part in enumerate(parts or []):
         ptype = _one_str(part.get("type"))
         if ptype == "text":
             text = _one_str(part.get("text"))
@@ -1148,16 +1303,21 @@ def _dreamina_bind_prompt_materials(
                 "id": str(uuid.uuid4()),
                 "meta_type": "subject",
                 "text": "",
-                "material_ref": {"type": "", "id": str(uuid.uuid4()), "material_idx": image_idx},
+                "material_ref": {"type": "", "id": str(uuid.uuid4()), "material_idx": len(material_list) - 1},
             })
             image_idx += 1
             continue
 
         if ptype == "image":
-            ref = pop_external_ref(_one_str(part.get("token")))
+            kind, ref = pop_external_ref(_one_str(part.get("token")), next_text_after(idx))
             if ref is None:
                 raise NonPenalizedTaskError('多余的那几个非数字"@xxx"找不到', status_code=422, content_violation=True)
-            append_image_material(ref)
+            if kind == "video":
+                append_video_material(ref)
+            elif kind == "audio":
+                append_audio_material(ref)
+            else:
+                append_image_material(ref)
             continue
 
     if next(subject_iter, None) is not None:
@@ -1166,6 +1326,10 @@ def _dreamina_bind_prompt_materials(
     # another image; any unmentioned uploads remain regular omni references.
     for ref in external_remaining:
         append_image_material(ref)
+    for ref in video_remaining:
+        append_video_material(ref)
+    for ref in audio_remaining:
+        append_audio_material(ref)
 
     if not meta_list:
         meta_list.append({"type": "", "id": str(uuid.uuid4()), "meta_type": "text", "text": ""})
@@ -1782,12 +1946,31 @@ async def _dreamina_direct_json_request(
         if k and str(k).lower() not in {"host", "cookie", "content-length", "connection", "accept-encoding"}
     }
     timeout = httpx.Timeout(120.0, connect=30.0, read=120.0, write=120.0)
-    async with httpx.AsyncClient(timeout=timeout, trust_env=True) as client:
-        resp = await client.request(
-            str(method or "GET").upper(),
-            url,
-            headers=safe_headers,
-            content=payload.encode("utf-8") if payload else None,
+    attempts = 3
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=True) as client:
+                resp = await client.request(
+                    str(method or "GET").upper(),
+                    url,
+                    headers=safe_headers,
+                    content=payload.encode("utf-8") if payload else None,
+                )
+            break
+        except _DREAMINA_DIRECT_HTTP_RETRY_EXC as e:
+            last_exc = e
+            append_log(log_file, f"[dreamina-api-upload] direct_json {label} transient_error attempt={attempt}/{attempts} err={type(e).__name__} url={safe_trim(url, 160)}")
+            if attempt >= attempts:
+                raise NonPenalizedTaskError(
+                    f"Dreamina {label} network failed after {attempts} attempts: {type(e).__name__}",
+                    status_code=502,
+                ) from e
+            await asyncio.sleep(min(2.0 * attempt, 5.0))
+    else:
+        raise NonPenalizedTaskError(
+            f"Dreamina {label} network failed: {type(last_exc).__name__ if last_exc else 'unknown'}",
+            status_code=502,
         )
     text = resp.text or ""
     append_log(log_file, f"[dreamina-api-upload] direct_json {label} status={resp.status_code} url={safe_trim(url, 160)}")
@@ -1822,8 +2005,27 @@ async def _dreamina_direct_upload_bytes(
         if k and str(k).lower() not in {"host", "cookie", "content-length", "connection", "accept-encoding"}
     }
     timeout = httpx.Timeout(300.0, connect=30.0, read=300.0, write=300.0)
-    async with httpx.AsyncClient(timeout=timeout, trust_env=True) as client:
-        resp = await client.post(url, headers=safe_headers, content=data)
+    attempts = 3
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=True) as client:
+                resp = await client.post(url, headers=safe_headers, content=data)
+            break
+        except _DREAMINA_DIRECT_HTTP_RETRY_EXC as e:
+            last_exc = e
+            append_log(log_file, f"[dreamina-api-upload] direct_upload {label} transient_error attempt={attempt}/{attempts} err={type(e).__name__} bytes={len(data)} url={safe_trim(url, 160)}")
+            if attempt >= attempts:
+                raise NonPenalizedTaskError(
+                    f"Dreamina {label} upload network failed after {attempts} attempts: {type(e).__name__}",
+                    status_code=502,
+                ) from e
+            await asyncio.sleep(min(2.0 * attempt, 5.0))
+    else:
+        raise NonPenalizedTaskError(
+            f"Dreamina {label} upload network failed: {type(last_exc).__name__ if last_exc else 'unknown'}",
+            status_code=502,
+        )
     append_log(log_file, f"[dreamina-api-upload] direct_upload {label} status={resp.status_code} bytes={len(data)} url={safe_trim(url, 160)}")
     if not (200 <= resp.status_code < 300):
         raise NonPenalizedTaskError(
@@ -2200,12 +2402,31 @@ async def _dreamina_vod_json_request(
     label: str,
 ) -> Dict[str, Any]:
     timeout = httpx.Timeout(120.0, connect=30.0, read=120.0, write=120.0)
-    async with httpx.AsyncClient(timeout=timeout, trust_env=True) as client:
-        resp = await client.request(
-            method.upper(),
-            url,
-            headers=headers,
-            content=payload.encode("utf-8") if payload else None,
+    attempts = 3
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=True) as client:
+                resp = await client.request(
+                    method.upper(),
+                    url,
+                    headers=headers,
+                    content=payload.encode("utf-8") if payload else None,
+                )
+            break
+        except _DREAMINA_DIRECT_HTTP_RETRY_EXC as e:
+            last_exc = e
+            append_log(log_file, f"[dreamina-vod-upload] {label} transient_error attempt={attempt}/{attempts} err={type(e).__name__} url={safe_trim(url, 180)}")
+            if attempt >= attempts:
+                raise NonPenalizedTaskError(
+                    f"Dreamina VOD {label} network failed after {attempts} attempts: {type(e).__name__}",
+                    status_code=502,
+                ) from e
+            await asyncio.sleep(min(2.0 * attempt, 5.0))
+    else:
+        raise NonPenalizedTaskError(
+            f"Dreamina VOD {label} network failed: {type(last_exc).__name__ if last_exc else 'unknown'}",
+            status_code=502,
         )
     text = resp.text or ""
     append_log(log_file, f"[dreamina-vod-upload] {label} status={resp.status_code} url={safe_trim(url, 180)}")
@@ -2253,8 +2474,27 @@ async def _dreamina_vod_direct_upload(
     if user_id:
         headers["X-Storage-U"] = quote(user_id, safe="")
     timeout = httpx.Timeout(300.0, connect=30.0, read=300.0, write=300.0)
-    async with httpx.AsyncClient(timeout=timeout, trust_env=True) as client:
-        resp = await client.post(upload_url, headers=headers, content=data)
+    attempts = 3
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=True) as client:
+                resp = await client.post(upload_url, headers=headers, content=data)
+            break
+        except _DREAMINA_DIRECT_HTTP_RETRY_EXC as e:
+            last_exc = e
+            append_log(log_file, f"[dreamina-vod-upload] binary transient_error attempt={attempt}/{attempts} err={type(e).__name__} bytes={len(data)} url={safe_trim(upload_url, 180)}")
+            if attempt >= attempts:
+                raise NonPenalizedTaskError(
+                    f"Dreamina VOD binary upload network failed after {attempts} attempts: {type(e).__name__}",
+                    status_code=502,
+                ) from e
+            await asyncio.sleep(min(2.0 * attempt, 5.0))
+    else:
+        raise NonPenalizedTaskError(
+            f"Dreamina VOD binary upload network failed: {type(last_exc).__name__ if last_exc else 'unknown'}",
+            status_code=502,
+        )
     append_log(log_file, f"[dreamina-vod-upload] binary status={resp.status_code} bytes={len(data)} url={safe_trim(upload_url, 180)}")
     if not (200 <= resp.status_code < 300):
         raise NonPenalizedTaskError(
@@ -2425,6 +2665,13 @@ def _dreamina_seedance_generate_body(
     material_type_codes = [_DREAMINA_MATERIAL_TYPE_CODES[x] for x in material_kinds if x in _DREAMINA_MATERIAL_TYPE_CODES]
     use_subject_material = subject_count > 0
     has_input_media = any(x in ("video", "audio") for x in material_kinds)
+    input_video_duration = 0
+    for material in material_list or []:
+        if _dreamina_material_kind(material or {}) != "video":
+            continue
+        video_info = (material or {}).get("video_info") if isinstance((material or {}).get("video_info"), dict) else {}
+        input_video_duration += int(round(float((video_info or {}).get("duration") or 0) / 1000.0))
+    submit_group_id = str(uuid.uuid4())
     # 标准 Seedance 2.0（文生视频/omni 参考图/首尾帧）与“封装的 fast”扣费字段不同：
     # benefit_type 需要带输出规格，并带 amount/workspace_id；否则会命中旧的 dreamina_seedance_20_fast 路径。
     output_benefit = _SEEDANCE_BENEFIT_MINI_OUTPUT if is_mini else (
@@ -2442,6 +2689,7 @@ def _dreamina_seedance_generate_body(
         "scene": "BasicVideoGenerateButton",
         "modelReqKey": model,
         "videoDuration": duration,
+        "batchNumber": 1,
         "reportParams": {
             "enterSource": "generate",
             "vipSource": "generate",
@@ -2453,10 +2701,12 @@ def _dreamina_seedance_generate_body(
     }
     if is_standard_output:
         scene_option["resolution"] = resolution
-        scene_option["inputVideoDuration"] = 0
+        scene_option["inputVideoDuration"] = input_video_duration
+        scene_option["useSeedanceFast5sFreeTrial"] = False
     metrics_extra = json.dumps({
         **({"promptSource": "custom"} if mode == "first_last_frames" else {}),
         "isDefaultSeed": 1, "originSubmitId": submit_id, "isRegenerate": False, "enterFrom": "click",
+        "batchNumber": 1, "submitGroupId": submit_group_id, "hasRejectedAudit": 0,
         "position": "page_bottom_box", "functionMode": function_mode,
         "sceneOptions": json.dumps([scene_option], separators=(",", ":")),
     }, separators=(",", ":"))
@@ -2514,7 +2764,16 @@ def _dreamina_seedance_generate_body(
             info["amount"] = int(amount)
         return info
 
-    output_amount = duration if is_standard_output else None
+    # Fast/Mini submit bodies use public credit cost as amount. Keep Pro on the
+    # already verified seconds-based path for now.
+    output_amount = None
+    if is_standard_output:
+        if is_fast:
+            output_amount = int(duration) * 35
+        elif is_mini:
+            output_amount = int(duration) * 31
+        else:
+            output_amount = int(duration)
     commerce_info = make_commerce_info(output_benefit, output_amount)
     commerce_info_list: List[Dict[str, Any]] = []
     if base_benefit and base_benefit != output_benefit:
@@ -2523,8 +2782,15 @@ def _dreamina_seedance_generate_body(
         # tasks with uploaded videos/audios can fail with ret=1006.
         commerce_info_list.append(make_commerce_info(base_benefit, 0))
     commerce_info_list.append(dict(commerce_info))
+    # Match the web client: input-media jobs keep the input entitlement as the
+    # primary field, while the charged output tier stays in the commerce list.
+    primary_commerce_info = (
+        make_commerce_info(base_benefit, 0)
+        if has_input_media and base_benefit and base_benefit != output_benefit
+        else dict(commerce_info)
+    )
     body = {
-        "extend": {"root_model": model, "m_video_commerce_info": commerce_info, "workspace_id": 0, "m_video_commerce_info_list": commerce_info_list},
+        "extend": {"root_model": model, "m_video_commerce_info": primary_commerce_info, "workspace_id": 0, "m_video_commerce_info_list": commerce_info_list},
         "submit_id": submit_id, "metrics_extra": metrics_extra, "draft_content": json.dumps(draft, ensure_ascii=False, separators=(",", ":")),
         "http_common_info": {"aid": _DREAMINA_AID},
     }
@@ -4936,7 +5202,7 @@ async def _dreamina_fetch_hq_video_url(
     query_url = (
         f"{api_base}{_DREAMINA_GET_LOCAL_ITEM_LIST_PATH}"
         f"?aid={_DREAMINA_AID}&device_platform=web&region={_dreamina_region_for_country(header_loc)}"
-        f"&da_version={_DREAMINA_DRAFT_VERSION}&web_version={_DREAMINA_WEB_VERSION}"
+        f"&da_version={_DREAMINA_REQUEST_DA_VERSION}&web_version={_DREAMINA_WEB_VERSION}"
         f"&aigc_features={_DREAMINA_AIGC_FEATURES}"
     )
     tx = await page_fetch_json(
@@ -4993,7 +5259,7 @@ async def _dreamina_remove_history_record(
     remove_url = (
         f"{sess.dreamina_api_base}{_DREAMINA_REMOVE_HISTORY_PATH}"
         f"?aid={_DREAMINA_AID}&web_version={_DREAMINA_WEB_VERSION}"
-        f"&da_version={_DREAMINA_DRAFT_VERSION}&aigc_features={_DREAMINA_AIGC_FEATURES}"
+        f"&da_version={_DREAMINA_REQUEST_DA_VERSION}&aigc_features={_DREAMINA_AIGC_FEATURES}"
     )
     async with sess._bring_drafts_lock:
         await sess.ensure_open(
@@ -5075,7 +5341,7 @@ async def _dreamina_poll_history_until_result(
     query_url = (
         f"{sess.dreamina_api_base}{_DREAMINA_GET_HISTORY_BY_IDS_PATH}"
         f"?aid={_DREAMINA_AID}&device_platform=web&region={sess.dreamina_region}"
-        f"&da_version={_DREAMINA_DRAFT_VERSION}&web_version={_DREAMINA_WEB_VERSION}"
+        f"&da_version={_DREAMINA_REQUEST_DA_VERSION}&web_version={_DREAMINA_WEB_VERSION}"
         f"&aigc_features={_DREAMINA_AIGC_FEATURES}"
     )
     for retry in range(max_retries):
@@ -5266,7 +5532,7 @@ async def _dreamina_single_image_upload_save_workflow(
         raise NonPenalizedTaskError(f"Dreamina CommitImageUpload 失败 uri/width/height: {safe_trim(_compact_json(upload_info.get('commit_response')), 700)}", status_code=502)
 
     await progress_cb(45, {"stage": "get_image_by_uri", "uri": uri})
-    get_url = f"{api_base}{_DREAMINA_GET_IMAGE_BY_URI_PATH}?aid={_DREAMINA_AID}&device_platform=web&region={_dreamina_region_for_country(header_loc)}&web_version={_DREAMINA_WEB_VERSION}&da_version={_DREAMINA_DRAFT_VERSION}&aigc_features={_DREAMINA_AIGC_FEATURES}"
+    get_url = f"{api_base}{_DREAMINA_GET_IMAGE_BY_URI_PATH}?aid={_DREAMINA_AID}&device_platform=web&region={_dreamina_region_for_country(header_loc)}&web_version={_DREAMINA_WEB_VERSION}&da_version={_DREAMINA_REQUEST_DA_VERSION}&aigc_features={_DREAMINA_AIGC_FEATURES}"
     img_tx = await page_fetch_json(
         page, url=get_url, method="POST",
         headers=build_jimeng_page_fetch_headers_body(uri=_DREAMINA_GET_IMAGE_BY_URI_PATH, appid=_DREAMINA_AID, appvr=_APPVR, pf="7", lan="en", loc=header_loc, headers={"Referer": target_page}),
@@ -5278,7 +5544,7 @@ async def _dreamina_single_image_upload_save_workflow(
         raise NonPenalizedTaskError(f"Dreamina get_image_by_uri missing image_url: {safe_trim(_compact_json(img_obj), 700)}", status_code=502)
 
     await progress_cb(70, {"stage": "create_subject", "name": name})
-    create_url = f"{api_base}{_DREAMINA_SUBJECT_CREATE_PATH}?aid={_DREAMINA_AID}&web_version={_DREAMINA_WEB_VERSION}&da_version={_DREAMINA_DRAFT_VERSION}&aigc_features={_DREAMINA_AIGC_FEATURES}"
+    create_url = f"{api_base}{_DREAMINA_SUBJECT_CREATE_PATH}?aid={_DREAMINA_AID}&web_version={_DREAMINA_WEB_VERSION}&da_version={_DREAMINA_REQUEST_DA_VERSION}&aigc_features={_DREAMINA_AIGC_FEATURES}"
     create_body = {"content": {"description": "", "name": name, "main_image": {"width": width, "height": height, "image_uri": uri, "image_url": image_url}}}
     create_tx = await page_fetch_json(
         page, url=create_url, method="POST",
@@ -5391,7 +5657,7 @@ async def dreamina_workflow(
     elif prompt_subject_ids:
         append_log(log_file, f"[dreamina-subject-ref] prompt_ids={prompt_subject_ids} matched=0, ignored")
 
-    if prompt_image_tokens and len(prompt_image_tokens) > len(omni_refs):
+    if prompt_image_tokens and len(prompt_image_tokens) > (len(omni_refs) + len(video_refs) + len(audio_refs)):
         raise NonPenalizedTaskError(f'参考图片【{prompt_image_tokens[-1].get("raw")}】 未找到', status_code=422, content_violation=True)
     if prompt_subject_refs or prompt_image_tokens:
         p["functionMode"] = "omni_reference"
@@ -5522,7 +5788,7 @@ async def dreamina_workflow(
                 upload_uris: List[str] = []
                 if image_refs:
                     append_log(log_file, f"[dreamina-api-upload] external_refs={safe_trim(_compact_json(image_refs), 1200)}")
-                    if external_prompt_ref_count and external_prompt_ref_count > len(image_refs):
+                    if external_prompt_ref_count and external_prompt_ref_count > (len(image_refs) + len(video_refs) + len(audio_refs)):
                         raise NonPenalizedTaskError('多余的那几个非数字"@xxx"找不到', status_code=422, content_violation=True)
                     await progress_cb(3, {"stage": "upload_images_api", "count": len(image_refs)})
                     upload_uris = await _dreamina_upload_image_refs_via_page_fetch(
@@ -5571,15 +5837,10 @@ async def dreamina_workflow(
                         prompt_parts,
                         prompt_subject_refs,
                         image_refs,
+                        video_refs,
+                        audio_refs,
                     )
                     append_log(log_file, f"[dreamina-material-bind] kinds={material_kinds} prompt={safe_trim(prompt_for_body, 300)} material_count={len(material_list)} meta_count={len(meta_list)}")
-                    if video_refs or audio_refs:
-                        for ref in video_refs:
-                            material_list.append(_dreamina_video_material(ref))
-                        for ref in audio_refs:
-                            material_list.append(_dreamina_audio_material(ref))
-                        material_kinds = [_dreamina_material_kind(m) for m in material_list]
-                        meta_list = _dreamina_build_mixed_meta_list(prompt_for_body, material_kinds)
                 elif image_refs or video_refs or audio_refs:
                     prompt_for_body = prompt
                     material_list = []
@@ -5651,40 +5912,67 @@ async def dreamina_workflow(
                 generate_url = (
                     f"{sess.dreamina_api_base}{_DREAMINA_GENERATE_PATH}"
                     f"?aid={_DREAMINA_AID}&device_platform=web&region={sess.dreamina_region}"
-                    f"&da_version={_DREAMINA_DRAFT_VERSION}&os=windows&web_component_open_flag=0&commerce_with_input_video=1"
+                    f"&da_version={_DREAMINA_REQUEST_DA_VERSION}&os=windows&web_component_open_flag=0&commerce_with_input_video=1"
                     f"&web_version={_DREAMINA_WEB_VERSION}&aigc_features={_DREAMINA_AIGC_FEATURES}"
                 )
-                commerce_items = ((generate_body.get("extend") or {}).get("m_video_commerce_info_list") or [])
-                commerce_debug = [
-                    {
-                        "benefit_type": _one_str((x or {}).get("benefit_type")),
-                        **({"amount": (x or {}).get("amount")} if (x or {}).get("amount") is not None else {}),
-                    }
-                    for x in commerce_items
-                    if isinstance(x, dict)
-                ]
+                commerce_debug = _dreamina_commerce_debug_from_body(generate_body)
                 append_log(
                     log_file,
-                    f"[dreamina-api-submit] model={model_key} material_types={material_types} commerce={safe_trim(_compact_json(commerce_debug), 500)}",
+                    f"[dreamina-api-submit] model={model_key} da_version={_DREAMINA_REQUEST_DA_VERSION} store_country={_one_str(sess.store_country_code).lower() or '-'} material_types={material_types} primary={safe_trim(_compact_json(_dreamina_commerce_primary_debug_from_body(generate_body)), 220)} commerce={safe_trim(_compact_json(commerce_debug), 500)}",
                 )
                 await progress_cb(6, {"stage": "submit_api", "model_name": model_key, "function_mode": function_mode, "region": sess.dreamina_region})
                 try:
-                    submit_tx = await page_fetch_json(
-                        page,
-                        url=generate_url,
-                        method="POST",
-                        headers=build_jimeng_page_fetch_headers_body(
-                            uri=_DREAMINA_GENERATE_PATH,
-                            appid=_DREAMINA_AID,
-                            appvr=_APPVR,
-                            pf="7",
-                            lan="en",
-                            loc=sess.dreamina_header_loc,
-                            headers={"Referer": target_page},
-                        ),
-                        json_data=generate_body,
-                        log_file=log_file,
-                    )
+                    submit_extra_headers = {"Referer": target_page, "X-Platform": "pc"}
+                    store_country = _one_str(sess.store_country_code).lower()
+                    if store_country:
+                        submit_extra_headers["store-country-code"] = store_country
+                        submit_extra_headers["store-country-code-src"] = "uid"
+                    async def submit_once(body: Dict[str, Any]) -> Dict[str, Any]:
+                        return await page_fetch_json(
+                            page,
+                            url=generate_url,
+                            method="POST",
+                            headers=build_jimeng_page_fetch_headers_body(
+                                uri=_DREAMINA_GENERATE_PATH,
+                                appid=_DREAMINA_AID,
+                                appvr=_APPVR,
+                                pf="7",
+                                lan="en",
+                                loc=sess.dreamina_header_loc,
+                                headers=submit_extra_headers,
+                            ),
+                            json_data=body,
+                            log_file=log_file,
+                        )
+
+                    submit_tx = await submit_once(generate_body)
+                    submit_obj_probe = submit_tx.get("_json") or {}
+                    if _one_str(submit_obj_probe.get("ret")) not in ("", "0"):
+                        fail_data = submit_obj_probe.get("data") if isinstance(submit_obj_probe.get("data"), dict) else {}
+                        fail_code = _one_str((fail_data or {}).get("fail_code") or submit_obj_probe.get("ret"))
+                        if fail_code == "1006":
+                            ext = generate_body.get("extend") if isinstance(generate_body.get("extend"), dict) else {}
+                            items = ext.get("m_video_commerce_info_list") if isinstance(ext.get("m_video_commerce_info_list"), list) else []
+                            primary = ext.get("m_video_commerce_info") if isinstance(ext.get("m_video_commerce_info"), dict) else {}
+                            output_item = items[-1] if items and isinstance(items[-1], dict) else {}
+                            retry_modes = []
+                            if os.getenv("DREAMINA_SUBMIT_DIAGNOSTIC_RETRY") == "1":
+                                if output_item and _compact_json(primary) != _compact_json(output_item):
+                                    retry_modes.append("output_primary")
+                                retry_modes.extend(["zero_amount", "octo_zero"])
+                            for retry_mode in retry_modes:
+                                retry_body = _dreamina_commerce_retry_body(generate_body, retry_mode)
+                                append_log(
+                                    log_file,
+                                    f"[dreamina-api-submit-retry] mode={retry_mode} primary={safe_trim(_compact_json(_dreamina_commerce_primary_debug_from_body(retry_body)), 220)} commerce={safe_trim(_compact_json(_dreamina_commerce_debug_from_body(retry_body)), 500)}",
+                                )
+                                retry_tx = await submit_once(retry_body)
+                                retry_obj = retry_tx.get("_json") or {}
+                                append_log(log_file, f"[dreamina-api-submit-retry] mode={retry_mode} response={safe_trim(_compact_json(retry_obj), 1000)}")
+                                if _one_str(retry_obj.get("ret")) in ("", "0"):
+                                    submit_tx = retry_tx
+                                    generate_body = retry_body
+                                    break
                     await sess._bring_target_page_to_front(refresh_target=True, drafts_url=target_page, close_other_pages=False, acquire_bring_lock=False)
                 finally:
                     try:

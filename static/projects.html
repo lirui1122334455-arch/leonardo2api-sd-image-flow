@@ -2812,16 +2812,32 @@
         if (!accountsImportBindSummary) return;
         const items = Array.isArray(d?.items) ? d.items : [];
         const head = `${d?.message || "import-bind done"}${d?.create_error ? ` | import warning: ${d.create_error}` : ""}`;
+        const stats = [
+          `parsed=${d?.parsed ?? "-"}`,
+          `created=${d?.created ?? "-"}`,
+          `bindable=${d?.bindable ?? "-"}`,
+          `bound=${d?.bound ?? "-"}`,
+          `opened=${d?.opened ?? "-"}`,
+          `skipped=${d?.skipped_accounts ?? "-"}`,
+          `auto_windows=${Array.isArray(d?.auto_created_windows) ? d.auto_created_windows.length : "-"}`,
+        ].join(" · ");
         const rows = items.slice(0, 20).map(x => {
           const quota = x.remaining_quota === null || x.remaining_quota === undefined ? "-" : String(x.remaining_quota);
           const errs = Array.isArray(x.errors) && x.errors.length ? ` | ${x.errors.join("; ")}` : "";
           return `<div class="mono">${escapeHtml(String(x.status || "-"))} · ${escapeHtml(String(x.username || "-"))} -> #${escapeHtml(String(x.window_pk || "-"))} ${escapeHtml(String(x.window_name || ""))} · quota=${escapeHtml(quota)}${escapeHtml(errs)}</div>`;
         }).join("");
+        const skippedBound = Array.isArray(d?.skipped_bound_accounts) ? d.skipped_bound_accounts : [];
+        const missingAccounts = Array.isArray(d?.missing_accounts) ? d.missing_accounts : [];
+        const skippedRows = skippedBound.slice(0, 12).map(x => `<div class="mono text-muted">已绑定跳过 · ${escapeHtml(String(x.username || "-"))} · ${escapeHtml(String(x.windows || ""))}</div>`).join("");
+        const missingRows = missingAccounts.slice(0, 12).map(x => `<div class="mono text-danger">导入缺失 · ${escapeHtml(String(x.username || "-"))} · ${escapeHtml(String(x.reason || ""))}</div>`).join("");
         const more = items.length > 20 ? `<div class="text-muted">... ${items.length - 20} more</div>` : "";
         accountsImportBindSummary.innerHTML = `
           <div class="border rounded p-2 mt-2 bg-light">
             <div class="fw-semibold">${escapeHtml(head)}</div>
+            <div class="small text-muted mono">${escapeHtml(stats)}</div>
             ${rows || '<div class="text-muted">No binding rows returned.</div>'}
+            ${skippedRows}
+            ${missingRows}
             ${more}
           </div>
         `;
@@ -2843,10 +2859,12 @@
               task_type_code: "leonardo_workflow",
               low_credit_threshold: 800,
               replace_low_credit: true,
-              bind_empty_windows: true,
+              bind_empty_windows: false,
               add_to_task_pool: true,
               open_after_bind: true,
-              refresh_quota_after_bind: true,
+              refresh_quota_after_bind: false,
+              auto_create_windows: true,
+              auto_create_window_max: 100,
               daily_quota: 9999,
               remaining_quota: 0,
               open_browser_only: false,

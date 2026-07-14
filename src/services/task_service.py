@@ -115,6 +115,37 @@ def _flow_is_account_unavailable_error(exc: BaseException) -> bool:
     )
 
 
+def _leonardo_is_switchable_error(exc: BaseException) -> bool:
+    msg = str(exc or "").strip().lower()
+    status_code = getattr(exc, "status_code", None)
+    try:
+        code = int(status_code) if status_code is not None else None
+    except Exception:
+        code = None
+    switch_hints = (
+        "login_required",
+        "cloudflare_challenge",
+        "cloudflare",
+        "turnstile",
+        "unauthorized",
+        "unauthenticated",
+        "jwt",
+        "auth header capture timed out",
+        "browser context is not initialized",
+        "fingerprint window is not open",
+        "leonardo page is not open",
+        "missing better-auth",
+        "session ping",
+        "graphql probe",
+        "window_not_open",
+        "no_leonardo_page",
+        "quota",
+        "token",
+        "insufficient",
+    )
+    return code in {401, 403, 429, 503, 504} or any(h in msg for h in switch_hints)
+
+
 def _effective_browser_pure_mode_from_context(ctx: Dict[str, Any]) -> bool:
     """窗口池 browser_open 的 pure_mode：使用绑定 pure_mode 列；缺省保持旧行为 True。"""
     return _db_bool(ctx.get("pure_mode"), default=True)
@@ -339,6 +370,12 @@ class TaskService:
         self._gpt_keepalive_pick_cursor: int = 0
         self._leonardo_keepalive_pick_cursor: int = 0
         self._leonardo_keepalive_next_due: dict[int, float] = {}
+        self._leonardo_keepalive_graphql_next_due: dict[int, float] = {}
+        self._leonardo_keepalive_auth_failures: dict[int, int] = {}
+        self._leonardo_keepalive_state: dict[int, str] = {}
+        self._leonardo_keepalive_last_reason: dict[int, str] = {}
+        self._leonardo_keepalive_last_ok: dict[int, float] = {}
+        self._leonardo_proxy_warning_logged: set[int] = set()
 
     def set_browser_pool_limit(self, limit: int) -> None:
         """Hot-update scheduling candidate pool size."""
@@ -442,6 +479,13 @@ class TaskService:
             val = float(default)
         return max(float(minimum), val)
 
+    def _leonardo_keepalive_int(self, key: str, default: int, *, minimum: int = 0) -> int:
+        try:
+            val = int(self._leonardo_keepalive_config().get(key, default))
+        except Exception:
+            val = int(default)
+        return max(int(minimum), val)
+
     def _leonardo_keepalive_mapping_ids(self) -> set[int]:
         raw = self._leonardo_keepalive_config().get("mapping_ids", "")
         if raw is None:
@@ -469,6 +513,7 @@ class TaskService:
             "auth_capture_unavailable": "auth_unavailable_backoff_seconds",
             "graphql_probe_failed": "auth_unavailable_backoff_seconds",
             "login_required": "login_backoff_seconds",
+            "session_missing": "login_backoff_seconds",
             "cloudflare_challenge": "cloudflare_backoff_seconds",
         }
         key = key_by_reason.get(reason_key, "auth_unavailable_backoff_seconds")
@@ -493,6 +538,50 @@ class TaskService:
         if hi <= lo:
             return lo
         return random.uniform(lo, hi)
+
+    def _leonardo_set_state(self, mapping_id: int, state: str, *, reason: str = "") -> None:
+        mid = int(mapping_id)
+        new_state = str(state or "unknown").strip().lower() or "unknown"
+        old_state = self._leonardo_keepalive_state.get(mid, "unknown")
+        old_reason = self._leonardo_keepalive_last_reason.get(mid, "")
+        self._leonardo_keepalive_state[mid] = new_state
+        self._leonardo_keepalive_last_reason[mid] = str(reason or "").strip()
+        if old_state != new_state or old_reason != self._leonardo_keepalive_last_reason[mid]:
+            logger.info(
+                "leonardo state: mapping=%s %s->%s reason=%s",
+                mid,
+                old_state,
+                new_state,
+                self._leonardo_keepalive_last_reason[mid] or "-",
+            )
+
+    def _leonardo_mark_online(self, mapping_id: int, *, degraded: bool = False, reason: str = "") -> None:
+        mid = int(mapping_id)
+        self._leonardo_keepalive_auth_failures.pop(mid, None)
+        self._leonardo_keepalive_last_ok[mid] = time.monotonic()
+        self._leonardo_set_state(mid, "online_degraded" if degraded else "online", reason=reason if degraded else "")
+
+    def _leonardo_record_auth_failure(self, mapping_id: int, reason: str) -> tuple[int, bool]:
+        mid = int(mapping_id)
+        streak = int(self._leonardo_keepalive_auth_failures.get(mid, 0)) + 1
+        self._leonardo_keepalive_auth_failures[mid] = streak
+        required = self._leonardo_keepalive_int("auth_failure_confirmations", 2, minimum=1)
+        confirmed = streak >= required
+        self._leonardo_set_state(mid, "offline" if confirmed else "suspect", reason=reason)
+        return streak, confirmed
+
+    def _leonardo_graphql_probe_due(self, mapping_id: int) -> bool:
+        return time.monotonic() >= self._leonardo_keepalive_graphql_next_due.get(int(mapping_id), 0.0)
+
+    def _leonardo_schedule_next_graphql_probe(self, mapping_id: int) -> float:
+        delay = self._leonardo_keepalive_random_delay(
+            "graphql_interval_min_seconds",
+            "graphql_interval_max_seconds",
+            1200.0,
+            1800.0,
+        )
+        self._leonardo_keepalive_graphql_next_due[int(mapping_id)] = time.monotonic() + delay
+        return delay
 
     def start_flow_account_health_checker(self) -> None:
         """启动 Flow 低频账号健康检查协程（幂等）。"""
@@ -534,7 +623,7 @@ class TaskService:
 
     def start_leonardo_keepalive_checker(self) -> None:
         """Start the low-frequency Leonardo auth/session keepalive loop."""
-        if not self._leonardo_keepalive_bool("enabled", False):
+        if not self._leonardo_keepalive_bool("enabled", True):
             return
         if self._leonardo_keepalive_task is not None and not self._leonardo_keepalive_task.done():
             return
@@ -1263,6 +1352,7 @@ class TaskService:
                   t.default_target_url,
                   w.window_key,
                   w.window_name,
+                  w.platform_account,
                   s.space_id,
                   b.vendor,
                   b.lan_addr,
@@ -1279,6 +1369,7 @@ class TaskService:
                   AND w.deleted = 0 AND w.enabled = 1
                   AND b.deleted = 0
                   AND TRIM(COALESCE(w.window_key, '')) <> ''
+                  AND TRIM(COALESCE(w.platform_account, '')) <> ''
                 ORDER BY COALESCE(w.window_sort_num, 999999), m.id
                 """
             )
@@ -1348,8 +1439,8 @@ class TaskService:
         startup_delay = self._leonardo_keepalive_random_delay(
             "startup_delay_min_seconds",
             "startup_delay_max_seconds",
-            120.0,
-            300.0,
+            30.0,
+            90.0,
         )
         logger.info("leonardo keepalive scheduled in %.0fs", startup_delay)
         if await self._flow_sleep_or_stop(startup_delay):
@@ -1357,9 +1448,19 @@ class TaskService:
 
         while not self._window_pool_stop.is_set():
             try:
-                row = await self._leonardo_keepalive_pick_candidate_row()
-                if row:
+                limit = self._leonardo_keepalive_int("max_mappings_per_tick", 3, minimum=1)
+                rows = await self._leonardo_keepalive_pick_candidate_rows(limit=limit)
+                for idx, row in enumerate(rows):
                     await self._leonardo_keepalive_probe_mapping(row)
+                    if idx < len(rows) - 1:
+                        delay = self._leonardo_keepalive_random_delay(
+                            "between_mappings_min_seconds",
+                            "between_mappings_max_seconds",
+                            10.0,
+                            25.0,
+                        )
+                        if await self._flow_sleep_or_stop(delay):
+                            return
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -1368,13 +1469,17 @@ class TaskService:
             interval = self._leonardo_keepalive_random_delay(
                 "interval_min_seconds",
                 "interval_max_seconds",
-                900.0,
-                1500.0,
+                60.0,
+                120.0,
             )
             if await self._flow_sleep_or_stop(interval):
                 return
 
     async def _leonardo_keepalive_pick_candidate_row(self) -> Optional[Dict[str, Any]]:
+        rows = await self._leonardo_keepalive_pick_candidate_rows(limit=1)
+        return rows[0] if rows else None
+
+    async def _leonardo_keepalive_pick_candidate_rows(self, *, limit: int) -> list[Dict[str, Any]]:
         rows = await self._leonardo_keepalive_list_mapping_rows(
             include_disabled=self._leonardo_keepalive_bool("include_disabled", False)
         )
@@ -1392,10 +1497,29 @@ class TaskService:
             if now >= self._leonardo_keepalive_next_due.get(int(r.get("mapping_id") or r.get("id") or 0), 0.0)
         ]
         if not rows:
-            return None
-        idx = self._leonardo_keepalive_pick_cursor % len(rows)
-        self._leonardo_keepalive_pick_cursor += 1
-        return rows[idx]
+            return []
+        count = min(max(1, int(limit or 1)), len(rows))
+        urgent_states = {"suspect", "starting", "offline", "recovering"}
+        urgent = [
+            r
+            for r in rows
+            if self._leonardo_keepalive_state.get(int(r.get("mapping_id") or r.get("id") or 0), "") in urgent_states
+        ]
+        urgent.sort(
+            key=lambda r: self._leonardo_keepalive_next_due.get(
+                int(r.get("mapping_id") or r.get("id") or 0), 0.0
+            )
+        )
+        if len(urgent) >= count:
+            return urgent[:count]
+
+        urgent_ids = {int(r.get("mapping_id") or r.get("id") or 0) for r in urgent}
+        normal = [r for r in rows if int(r.get("mapping_id") or r.get("id") or 0) not in urgent_ids]
+        if normal:
+            idx = self._leonardo_keepalive_pick_cursor % len(normal)
+            self._leonardo_keepalive_pick_cursor += max(1, count - len(urgent))
+            normal = normal[idx:] + normal[:idx]
+        return (urgent + normal)[:count]
 
     async def _leonardo_keepalive_list_mapping_rows(self, *, include_disabled: bool) -> list[Dict[str, Any]]:
         enabled_clause = "" if include_disabled else "AND m.enabled = 1"
@@ -1411,6 +1535,8 @@ class TaskService:
                   t.default_target_url,
                   w.window_key,
                   w.window_name,
+                  w.platform_account,
+                  w.proxy_id,
                   s.space_id,
                   b.vendor,
                   b.lan_addr,
@@ -1427,11 +1553,46 @@ class TaskService:
                   AND w.deleted = 0 AND w.enabled = 1
                   AND b.deleted = 0
                   AND TRIM(COALESCE(w.window_key, '')) <> ''
+                  AND TRIM(COALESCE(w.platform_account, '')) <> ''
                 ORDER BY COALESCE(w.window_sort_num, 999999), m.id
                 """
             )
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
+
+    async def _leonardo_open_closed_mapping(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        from .fp_browser_client import FPBrowserClient
+
+        vendor = str(row.get("vendor") or row.get("browser_vendor") or "roxy").strip() or "roxy"
+        base_url = str(row.get("lan_addr") or row.get("browser_base_url") or "").strip()
+        access_key = row.get("access_key") if row.get("access_key") is not None else row.get("browser_access_key")
+        space_id = str(row.get("space_id") or "").strip()
+        window_key = str(row.get("window_key") or "").strip()
+        if not base_url or not space_id or not window_key:
+            return {"success": False, "error": "mapping missing lan_addr/space_id/window_key"}
+
+        try:
+            rsp = await asyncio.wait_for(
+                FPBrowserClient().browser_open(
+                    vendor=vendor,
+                    base_url=base_url,
+                    access_key=access_key,
+                    space_id=space_id,
+                    window_key=window_key,
+                    args=[],
+                    force_open=False,
+                    headless=_db_bool(row.get("headless"), default=False),
+                    pure_mode=_effective_browser_pure_mode_from_context(row),
+                ),
+                timeout=self._leonardo_keepalive_float("window_open_timeout_seconds", 60.0, minimum=10.0),
+            )
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
+        code = (rsp or {}).get("code")
+        data = (rsp or {}).get("data") or {}
+        success = code == 0 or bool(data.get("http") or data.get("ws"))
+        return {"success": bool(success), "response": rsp}
 
     async def _leonardo_keepalive_probe_mapping(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         mid = int(row.get("mapping_id") or row.get("id") or 0)
@@ -1445,18 +1606,30 @@ class TaskService:
 
         from .leonardo_task_executor import (
             LEONARDO_DEFAULT_AUTH_CACHE_SECONDS,
+            LEONARDO_DEFAULT_CF_REFRESH_TTL_SECONDS,
             leonardo_keepalive,
+            leonardo_restart_and_login_mapping,
         )  # type: ignore
 
-        timeout = self._leonardo_keepalive_float("timeout_seconds", 30.0, minimum=5.0)
+        if int(row.get("proxy_id") or 0) <= 0 and mid not in self._leonardo_proxy_warning_logged:
+            self._leonardo_proxy_warning_logged.add(mid)
+            logger.warning(
+                "leonardo mapping has no local fixed proxy binding: mapping=%s; verify the fingerprint profile itself uses a stable IP",
+                mid,
+            )
+
+        timeout = self._leonardo_keepalive_float("timeout_seconds", 25.0, minimum=5.0)
         cache_seconds = self._leonardo_keepalive_float(
-            "auth_cache_seconds",
-            LEONARDO_DEFAULT_AUTH_CACHE_SECONDS,
-            minimum=0.0,
+            "auth_cache_seconds", LEONARDO_DEFAULT_AUTH_CACHE_SECONDS, minimum=0.0
+        )
+        cf_refresh_ttl = self._leonardo_keepalive_float(
+            "cf_refresh_ttl_seconds", LEONARDO_DEFAULT_CF_REFRESH_TTL_SECONDS, minimum=0.0
         )
         target_url = str(row.get("default_target_url") or "").strip() or DEFAULT_LEONARDO_TARGET
         vendor = str(row.get("vendor") or row.get("browser_vendor") or "generic").strip() or "generic"
         access_key = row.get("access_key") if row.get("access_key") is not None else row.get("browser_access_key")
+        graphql_due = self._leonardo_keepalive_bool("probe_graphql", True) and self._leonardo_graphql_probe_due(mid)
+
         try:
             result = await asyncio.wait_for(
                 leonardo_keepalive(
@@ -1470,46 +1643,226 @@ class TaskService:
                     pure_mode=_effective_browser_pure_mode_from_context(row),
                     auth_cache_seconds=cache_seconds,
                     auth_capture_timeout_seconds=timeout,
-                    probe_graphql=self._leonardo_keepalive_bool("probe_graphql", True),
+                    probe_graphql=graphql_due,
+                    active_auth_capture=self._leonardo_keepalive_bool("active_auth_capture", False),
+                    auth_session_probe_enabled=self._leonardo_keepalive_bool("auth_session_probe_enabled", True),
+                    session_ping_enabled=self._leonardo_keepalive_bool("session_ping_enabled", True),
+                    cf_refresh_ttl_seconds=cf_refresh_ttl,
+                    ui_mode_toggle=self._leonardo_keepalive_bool("ui_mode_toggle", False),
+                    active_page_refresh=self._leonardo_keepalive_bool("active_page_refresh", False),
+                    disconnect_after=self._leonardo_keepalive_bool("disconnect_after_keepalive", True),
                 ),
-                timeout=max(8.0, timeout + 10.0),
+                timeout=max(45.0, timeout * 3.0 + 45.0),
             )
-            if bool((result or {}).get("ok")):
-                self._leonardo_keepalive_next_due.pop(mid, None)
-                balance = (result or {}).get("balance")
-                if isinstance(balance, dict) and "remaining_quota" in balance:
-                    remaining = int(balance.get("remaining_quota") or 0)
-                    await self.db.update_task_type_window(
-                        mapping_id=mid,
-                        remaining_quota=remaining,
-                        sora_remaining_count=remaining,
-                        sora_purchased_remaining_count=int(balance.get("paid_tokens") or 0),
-                        sora_plan_title=str(balance.get("plan") or "").strip(),
-                        sora_subscription_end=str(balance.get("token_renewal_date") or "").strip(),
-                        sora_rate_limit_reached=False,
-                        sora_access_resets_in_seconds=0,
-                    )
-                    logger.info("leonardo keepalive ok: mapping=%s remaining_quota=%s", mid, remaining)
-                else:
-                    logger.info("leonardo keepalive ok: mapping=%s", mid)
-            else:
-                reason = str((result or {}).get("reason") or "unknown")
-                backoff = self._leonardo_keepalive_backoff_seconds(reason)
-                self._leonardo_keepalive_next_due[mid] = time.monotonic() + backoff
-                logger.info(
-                    "leonardo keepalive skipped: mapping=%s reason=%s backoff=%.0fs",
-                    mid,
-                    reason,
-                    backoff,
-                )
-            return result
         except asyncio.CancelledError:
             raise
-        except Exception as e:
-            backoff = self._leonardo_keepalive_backoff_seconds("auth_capture_unavailable")
-            self._leonardo_keepalive_next_due[mid] = time.monotonic() + backoff
-            logger.warning("leonardo keepalive skipped: mapping=%s err=%s backoff=%.0fs", mid, e, backoff)
+        except Exception as exc:
+            delay = self._leonardo_keepalive_random_delay(
+                "transient_retry_min_seconds", "transient_retry_max_seconds", 120.0, 300.0
+            )
+            self._leonardo_keepalive_next_due[mid] = time.monotonic() + delay
+            self._leonardo_set_state(mid, "unknown", reason="probe_exception")
+            logger.warning("leonardo keepalive probe error: mapping=%s retry=%.0fs err=%s", mid, delay, exc)
             return None
+
+        cookie_state = (result or {}).get("cookie_state")
+        if isinstance(cookie_state, dict) and cookie_state.get("cookies_checked"):
+            logger.info(
+                "leonardo keepalive state: mapping=%s cf_present=%s cf_ttl_seconds=%s better_auth=%s session_data=%s",
+                mid,
+                bool(cookie_state.get("cf_access_token_present")),
+                cookie_state.get("cf_access_token_ttl_seconds"),
+                bool(cookie_state.get("better_auth_session_present")),
+                int(cookie_state.get("better_auth_session_data_count") or 0),
+            )
+
+        if bool((result or {}).get("ok")):
+            session_state = str((result or {}).get("session_state") or "online").strip().lower()
+            degraded = session_state == "online_degraded"
+            self._leonardo_mark_online(
+                mid,
+                degraded=degraded,
+                reason=str((result or {}).get("reason") or "") if degraded else "",
+            )
+            success_delay = self._leonardo_keepalive_random_delay(
+                "success_interval_min_seconds", "success_interval_max_seconds", 600.0, 900.0
+            )
+            self._leonardo_keepalive_next_due[mid] = time.monotonic() + success_delay
+            if graphql_due:
+                self._leonardo_schedule_next_graphql_probe(mid)
+            balance = (result or {}).get("balance")
+            update_kwargs: Dict[str, Any] = {"consecutive_errors": 0, "error_cooldown_until": ""}
+            if isinstance(balance, dict) and "remaining_quota" in balance:
+                remaining = int(balance.get("remaining_quota") or 0)
+                update_kwargs.update(
+                    remaining_quota=remaining,
+                    sora_remaining_count=remaining,
+                    sora_purchased_remaining_count=int(balance.get("paid_tokens") or 0),
+                    sora_plan_title=str(balance.get("plan") or "").strip(),
+                    sora_subscription_end=str(balance.get("token_renewal_date") or "").strip(),
+                    sora_rate_limit_reached=False,
+                    sora_access_resets_in_seconds=0,
+                )
+            try:
+                await self.db.update_task_type_window(mapping_id=mid, **update_kwargs)
+            except Exception as update_exc:
+                logger.warning("leonardo keepalive state update failed: mapping=%s err=%s", mid, update_exc)
+            logger.info(
+                "leonardo keepalive ok: mapping=%s remaining_quota=%s graphql=%s next_due=%.0fs",
+                mid,
+                (balance or {}).get("remaining_quota") if isinstance(balance, dict) else "unchanged",
+                bool(graphql_due),
+                success_delay,
+            )
+            return result
+
+        reason = str((result or {}).get("reason") or "unknown").strip().lower()
+        session_state = str((result or {}).get("session_state") or "unknown").strip().lower()
+        if reason == "window_not_open":
+            if self._leonardo_keepalive_bool("auto_open_closed_windows", True):
+                self._leonardo_set_state(mid, "starting", reason=reason)
+                opened = await self._leonardo_open_closed_mapping(row)
+                if bool(opened.get("success")):
+                    delay = self._leonardo_keepalive_float("window_open_recheck_seconds", 45.0, minimum=10.0)
+                    self._leonardo_keepalive_next_due[mid] = time.monotonic() + delay
+                    logger.info("leonardo closed window opened: mapping=%s recheck=%.0fs", mid, delay)
+                    merged = dict(result or {})
+                    merged["window_open"] = opened
+                    return merged
+                logger.warning("leonardo closed window open failed: mapping=%s err=%s", mid, opened.get("error") or opened)
+            backoff = self._leonardo_keepalive_backoff_seconds(reason)
+            self._leonardo_keepalive_next_due[mid] = time.monotonic() + backoff
+            self._leonardo_set_state(mid, "closed", reason=reason)
+            return result
+
+        if reason == "cloudflare_challenge":
+            self._leonardo_set_state(mid, "manual_verification", reason=reason)
+            backoff = self._leonardo_keepalive_backoff_seconds(reason)
+            self._leonardo_keepalive_next_due[mid] = time.monotonic() + backoff
+            logger.warning("leonardo manual Cloudflare verification required: mapping=%s backoff=%.0fs", mid, backoff)
+            return result
+
+        auth_like = session_state == "offline" and reason in {"login_required", "session_missing"}
+        if not auth_like:
+            delay = self._leonardo_keepalive_random_delay(
+                "transient_retry_min_seconds", "transient_retry_max_seconds", 120.0, 300.0
+            )
+            self._leonardo_keepalive_next_due[mid] = time.monotonic() + delay
+            self._leonardo_set_state(mid, "unknown", reason=reason)
+            logger.info(
+                "leonardo probe inconclusive: mapping=%s state=%s reason=%s retry=%.0fs",
+                mid,
+                session_state,
+                reason,
+                delay,
+            )
+            return result
+
+        streak, confirmed = self._leonardo_record_auth_failure(mid, reason)
+        if not confirmed:
+            delay = self._leonardo_keepalive_random_delay(
+                "suspect_recheck_min_seconds", "suspect_recheck_max_seconds", 45.0, 90.0
+            )
+            self._leonardo_keepalive_next_due[mid] = time.monotonic() + delay
+            logger.warning(
+                "leonardo auth suspect: mapping=%s reason=%s streak=%s retry=%.0fs",
+                mid,
+                reason,
+                streak,
+                delay,
+            )
+            return result
+
+        try:
+            task_cd = self._leonardo_keepalive_int("recovery_task_cooldown_seconds", 900, minimum=60)
+            await self.db.mark_mapping_error(
+                mapping_id=mid,
+                threshold=int(row.get("continuous_error_threshold") or 3),
+                cooldown_seconds=task_cd,
+                cooldown_seconds_short=task_cd,
+                reset_on_threshold=False,
+            )
+        except Exception as cool_exc:
+            logger.warning("leonardo recovery cooldown failed: mapping=%s err=%s", mid, cool_exc)
+
+        if not self._leonardo_keepalive_bool("auto_relogin_enabled", True):
+            backoff = self._leonardo_keepalive_backoff_seconds("login_required")
+            self._leonardo_keepalive_next_due[mid] = time.monotonic() + backoff
+            return result
+
+        self._leonardo_set_state(mid, "recovering", reason=reason)
+        try:
+            ctx_row = await self.db.get_task_type_window_context(mid)
+        except Exception:
+            ctx_row = None
+        recover_result: Dict[str, Any]
+        if not ctx_row:
+            recover_result = {"success": False, "errors": ["mapping context not found"]}
+        else:
+            try:
+                recover_result = await asyncio.wait_for(
+                    leonardo_restart_and_login_mapping(
+                        ctx_row=ctx_row,
+                        headless=_db_bool(row.get("headless"), default=False),
+                        wait_after_open_seconds=self._leonardo_keepalive_float(
+                            "auto_relogin_wait_after_open_seconds", 3.0, minimum=0.0
+                        ),
+                    ),
+                    timeout=self._leonardo_keepalive_float("auto_relogin_timeout_seconds", 300.0, minimum=60.0),
+                )
+            except Exception as recover_exc:
+                recover_result = {"success": False, "errors": [str(recover_exc)]}
+
+        merged = dict(result or {})
+        merged["auto_relogin"] = recover_result
+        if bool(recover_result.get("manual_verification_required")):
+            self._leonardo_set_state(mid, "manual_verification", reason="cloudflare_challenge")
+            backoff = self._leonardo_keepalive_float("manual_verification_backoff_seconds", 1800.0, minimum=300.0)
+            self._leonardo_keepalive_next_due[mid] = time.monotonic() + backoff
+            logger.warning("leonardo recovery waiting for manual verification: mapping=%s backoff=%.0fs", mid, backoff)
+            return merged
+
+        if bool(recover_result.get("success")):
+            self._leonardo_mark_online(mid)
+            balance = recover_result.get("balance")
+            update_kwargs = {"consecutive_errors": 0, "error_cooldown_until": ""}
+            if isinstance(balance, dict) and "remaining_quota" in balance:
+                remaining = int(balance.get("remaining_quota") or 0)
+                update_kwargs.update(
+                    remaining_quota=remaining,
+                    sora_remaining_count=remaining,
+                    sora_purchased_remaining_count=int(balance.get("paid_tokens") or 0),
+                    sora_plan_title=str(balance.get("plan") or "").strip(),
+                    sora_subscription_end=str(balance.get("token_renewal_date") or "").strip(),
+                    sora_rate_limit_reached=False,
+                    sora_access_resets_in_seconds=0,
+                )
+            try:
+                await self.db.update_task_type_window(mapping_id=mid, **update_kwargs)
+            except Exception as update_exc:
+                logger.warning("leonardo recovery balance update failed: mapping=%s err=%s", mid, update_exc)
+            self._leonardo_schedule_next_graphql_probe(mid)
+            next_probe = self._leonardo_keepalive_float("post_relogin_probe_seconds", 60.0, minimum=10.0)
+            self._leonardo_keepalive_next_due[mid] = time.monotonic() + next_probe
+            logger.info("leonardo recovery completed: mapping=%s next_probe=%.0fs", mid, next_probe)
+            return merged
+
+        if bool(recover_result.get("preflight_inconclusive")):
+            self._leonardo_keepalive_auth_failures.pop(mid, None)
+            self._leonardo_set_state(mid, "unknown", reason="recovery_preflight_inconclusive")
+            delay = self._leonardo_keepalive_random_delay(
+                "transient_retry_min_seconds", "transient_retry_max_seconds", 120.0, 300.0
+            )
+            self._leonardo_keepalive_next_due[mid] = time.monotonic() + delay
+            logger.warning("leonardo recovery cancelled by inconclusive preflight: mapping=%s retry=%.0fs", mid, delay)
+            return merged
+
+        self._leonardo_set_state(mid, "offline", reason=reason)
+        backoff = self._leonardo_keepalive_backoff_seconds("login_required")
+        self._leonardo_keepalive_next_due[mid] = time.monotonic() + backoff
+        errs = "; ".join(str(x) for x in (recover_result.get("errors") or []) if str(x).strip())
+        logger.warning("leonardo recovery failed: mapping=%s backoff=%.0fs err=%s", mid, backoff, errs or "unknown")
+        return merged
 
     async def _flow_health_pick_candidate_row(self) -> Optional[Dict[str, Any]]:
         rows = await self._flow_list_mapping_rows(
@@ -1534,7 +1887,6 @@ class TaskService:
                 JOIN windows w ON w.id = m.window_pk
                 WHERE t.deleted = 0 AND t.enabled = 1
                   AND t.code = ?
-                  AND t.create_task_handler = 'veo_workflow'
                   AND m.deleted = 0 AND m.enabled = 1
                   AND w.deleted = 0 AND w.enabled = 1
                 """,
@@ -3162,6 +3514,10 @@ class TaskService:
                     picked.create_task_handler == "veo_workflow"
                     and _flow_is_account_unavailable_error(e)
                 )
+                leonardo_switchable_error = (
+                    picked.create_task_handler == "leonardo_workflow"
+                    and _leonardo_is_switchable_error(e)
+                )
                 if flow_account_unavailable:
                     await self._flow_disable_mapping_after_auth_failure(
                         picked.mapping_id,
@@ -3248,24 +3604,47 @@ class TaskService:
                     3,
                     minimum=0,
                 )
+                leonardo_switch_retry_limit = self._leonardo_keepalive_int(
+                    "task_switch_max_retries",
+                    3,
+                    minimum=0,
+                )
                 flow_remaining_accounts = 0
                 if flow_account_unavailable and _allow_account_switch:
                     try:
                         flow_remaining_accounts = await self._flow_enabled_mapping_count(picked.task_code)
                     except Exception:
                         flow_remaining_accounts = 0
+                leonardo_remaining_accounts = 0
+                if leonardo_switchable_error and _allow_account_switch:
+                    try:
+                        leonardo_remaining_accounts = await self._flow_enabled_mapping_count(picked.task_code)
+                    except Exception:
+                        leonardo_remaining_accounts = 0
                 can_retry = (
                     flow_account_unavailable
                     and _allow_account_switch
                     and flow_remaining_accounts > 0
                     and _retry_attempt < flow_switch_retry_limit
                 ) or (
+                    leonardo_switchable_error
+                    and _allow_account_switch
+                    and leonardo_remaining_accounts > 1
+                    and _retry_attempt < leonardo_switch_retry_limit
+                    and not _is_violation
+                ) or (
                     (not flow_account_unavailable)
+                    and (not leonardo_switchable_error)
                     and max_retries > 0
                     and _retry_attempt < max_retries
                     and not _is_violation
                 )
-                retry_limit_label = flow_switch_retry_limit if flow_account_unavailable else max_retries
+                if flow_account_unavailable:
+                    retry_limit_label = flow_switch_retry_limit
+                elif leonardo_switchable_error:
+                    retry_limit_label = leonardo_switch_retry_limit
+                else:
+                    retry_limit_label = max_retries
                 if can_retry:
                     archive_id = uuid.uuid4().hex
                     try:
@@ -3321,7 +3700,39 @@ class TaskService:
                     )
                 # 某些错误不应计入“窗口连续错误”（例如：Sora create 400 invalid_request、未抓到 POST 等环境/请求错误）
                 # 执行器侧会抛出带 no_penalty=true 的异常（或同名属性），这里做兼容判断。
-                if not no_penalty and not picked.create_task_handler == "sora_wm_remove":
+                if leonardo_switchable_error:
+                    try:
+                        short_cd = self._leonardo_keepalive_int(
+                            "task_switch_cooldown_seconds",
+                            180,
+                            minimum=10,
+                        )
+                        long_cd = self._leonardo_keepalive_int(
+                            "task_switch_long_cooldown_seconds",
+                            1800,
+                            minimum=60,
+                        )
+                        await self.db.mark_mapping_error(
+                            picked.mapping_id,
+                            threshold=picked.threshold,
+                            cooldown_seconds=long_cd,
+                            cooldown_seconds_short=short_cd,
+                            reset_on_threshold=False,
+                        )
+                        logger.warning(
+                            "leonardo mapping cooled after switchable task error: mapping=%s short_cooldown=%ss err=%s",
+                            picked.mapping_id,
+                            short_cd,
+                            err_msg,
+                        )
+                        self._signal_window_pool_replenish()
+                    except Exception as cool_exc:
+                        logger.warning(
+                            "leonardo mapping cooldown after switchable error failed: mapping=%s err=%s",
+                            picked.mapping_id,
+                            cool_exc,
+                        )
+                elif not no_penalty and not picked.create_task_handler == "sora_wm_remove":
                     await self.db.mark_mapping_error(
                         picked.mapping_id,
                         threshold=picked.threshold,
@@ -3460,7 +3871,7 @@ class TaskService:
                             "task retry enqueued: %s attempt=%d/%d queue_size=%d bind_window=%s",
                             task_id,
                             _retry_attempt + 1,
-                            picked.error_retry_count,
+                            retry_limit_label,
                             _retry_queue_size,
                             _bind_window_pk,
                         )

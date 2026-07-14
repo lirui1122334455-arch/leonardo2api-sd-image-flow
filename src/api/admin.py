@@ -2393,7 +2393,13 @@ async def _auto_create_empty_windows_for_binding(
         return {"created_windows": [], "sync_results": []}
 
     target_url = _normalize_import_platform_url(default_platform_url, default_platform_url)
-    prefix = "Dreamina" if str(task_code or "").strip() == "dreamina_workflow" else "Auto"
+    code = str(task_code or "").strip()
+    if code == "dreamina_workflow":
+        prefix = "Dreamina"
+    elif code == "leonardo_workflow":
+        prefix = "Leonardo"
+    else:
+        prefix = "Auto"
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     created_windows: List[Dict[str, Any]] = []
     created_keys: Set[str] = set()
@@ -2476,6 +2482,15 @@ async def import_bind_space_accounts(space_pk: int, req: ImportBindAccountsReque
         default_platform_url = "https://dreamina.capcut.com/"
     else:
         default_platform_url = "https://accounts.google.com/"
+    refresh_quota_after_bind = bool(req.refresh_quota_after_bind)
+    if task_code == "leonardo_workflow":
+        # Leonardo accounts must pass the login/Cloudflare page manually first.
+        # Do not run GraphQL quota probing immediately after binding a fresh account.
+        refresh_quota_after_bind = False
+    initial_remaining_quota = int(req.remaining_quota)
+    if task_code == "leonardo_workflow" and initial_remaining_quota < int(req.low_credit_threshold):
+        initial_remaining_quota = max(int(req.low_credit_threshold), int(req.daily_quota))
+    initial_mapping_enabled = task_code != "leonardo_workflow"
     parsed = _parse_batch_account_lines(req.content, req.platform_url, default_platform_url)
     if not parsed:
         raise HTTPException(status_code=400, detail="no valid accounts parsed; expected email----password or email----password----ignore----EFA")
@@ -2619,7 +2634,7 @@ async def import_bind_space_accounts(space_pk: int, req: ImportBindAccountsReque
     effective_auto_create_windows = bool(req.auto_create_windows) or (
         task_code == "dreamina_workflow" and bool(req.open_account_after_bind)
     )
-    if effective_auto_create_windows and bool(req.bind_empty_windows) and len(targets) < len(import_accounts):
+    if effective_auto_create_windows and len(targets) < len(import_accounts):
         missing_target_count = len(import_accounts) - len(targets)
         create_count = min(missing_target_count, int(req.auto_create_window_max or 0))
         if create_count > 0:
@@ -2635,6 +2650,16 @@ async def import_bind_space_accounts(space_pk: int, req: ImportBindAccountsReque
                 )
                 auto_created_windows = list(auto_create_result.get("created_windows") or [])
                 auto_create_sync_results = list(auto_create_result.get("sync_results") or [])
+                auto_created_keys = {
+                    str(x or "").strip()
+                    for x in list(auto_create_result.get("created_window_keys") or [])
+                    if str(x or "").strip()
+                }
+                auto_created_names = {
+                    str((x or {}).get("window_name") or "").strip()
+                    for x in auto_created_windows
+                    if isinstance(x, dict) and str((x or {}).get("window_name") or "").strip()
+                }
 
                 windows = await db.list_windows(space_pk)
                 windows_by_pk = {int(getattr(w, "id", 0) or 0): w for w in windows if int(getattr(w, "id", 0) or 0) > 0}
@@ -2662,7 +2687,13 @@ async def import_bind_space_accounts(space_pk: int, req: ImportBindAccountsReque
                     account_name = str(getattr(w, "platform_account", "") or "").strip()
                     if account_id > 0 or account_name:
                         continue
-                    targets.append({"window": w, "mapping": mappings_by_window.get(wpk), "reason": "auto_created_empty_window"})
+                    wkey = str(getattr(w, "window_key", "") or "").strip()
+                    wname = str(getattr(w, "window_name", "") or "").strip()
+                    is_auto_created = (wkey in auto_created_keys) or (wname in auto_created_names)
+                    if (not bool(req.bind_empty_windows)) and not is_auto_created:
+                        continue
+                    reason = "auto_created_empty_window" if is_auto_created else "empty_window"
+                    targets.append({"window": w, "mapping": mappings_by_window.get(wpk), "reason": reason})
                     used_window_pks.add(wpk)
             except Exception as e:
                 auto_create_error = str(e)
@@ -2726,8 +2757,8 @@ async def import_bind_space_accounts(space_pk: int, req: ImportBindAccountsReque
                     task_type_id=task_type_id,
                     window_pks=[wpk],
                     daily_quota=int(req.daily_quota),
-                    remaining_quota=int(req.remaining_quota),
-                    enabled=True,
+                    remaining_quota=initial_remaining_quota,
+                    enabled=initial_mapping_enabled,
                 )
                 fresh_mappings = await db.list_task_type_windows(task_type_id)
                 for m in fresh_mappings:
@@ -2756,7 +2787,18 @@ async def import_bind_space_accounts(space_pk: int, req: ImportBindAccountsReque
                 except Exception as e:
                     item["errors"].append(f"open failed: {e}")
 
-            if mapping_id > 0 and req.refresh_quota_after_bind:
+            if task_code == "leonardo_workflow" and _is_leonardo_account(account):
+                try:
+                    item["clear_session_result"] = await _clear_leonardo_window_site_session(
+                        client=client,
+                        browser=browser,
+                        space=space,
+                        window_key=window_key,
+                    )
+                except Exception as e:
+                    item["errors"].append(f"clear old Leonardo session failed: {e}")
+
+            if mapping_id > 0 and refresh_quota_after_bind:
                 try:
                     refresh_result = await refresh_mapping_remaining_quota(
                         mapping_id,
@@ -2769,12 +2811,17 @@ async def import_bind_space_accounts(space_pk: int, req: ImportBindAccountsReque
                     refreshed += 1
                 except Exception as e:
                     item["errors"].append(f"refresh quota failed: {e}")
+            elif mapping_id > 0 and task_code == "leonardo_workflow":
+                item["refresh_deferred"] = True
+                item["remaining_quota"] = initial_remaining_quota
 
             item["status"] = "ok" if not item["errors"] else "partial"
         except Exception as e:
             item["status"] = "failed"
             item["errors"].append(str(e))
         items.append(item)
+        if task_code == "leonardo_workflow" and idx < bind_count - 1:
+            await asyncio.sleep(5.0)
 
     skipped_accounts = len(import_accounts) - bind_count
     auto_created_count = len(auto_created_windows)
@@ -3050,6 +3097,602 @@ def _same_account_url(a: str, b: str) -> bool:
     return (not aa) or (not bb) or aa == bb
 
 
+def _is_leonardo_platform_url(value: Any) -> bool:
+    host = _safe_hostname(str(value or ""))
+    return host == "leonardo.ai" or host.endswith(".leonardo.ai")
+
+
+def _is_leonardo_account(account: Any) -> bool:
+    return bool(account) and _is_leonardo_platform_url(getattr(account, "platform_url", ""))
+
+
+LEONARDO_LOGIN_URL = "https://app.leonardo.ai/auth/login"
+LEONARDO_AUTH_COOKIE_NAMES = {
+    "__Secure-better-auth.session_token",
+}
+LEONARDO_AUTH_COOKIE_PREFIXES = (
+    "__Secure-better-auth.session_data",
+    "better-auth.",
+)
+LEONARDO_CF_COOKIE_NAMES = {
+    "CF_Access_Token",
+    "cf_clearance",
+    "__cf_bm",
+    "__cflb",
+    "__cfseq",
+}
+LEONARDO_CF_COOKIE_PREFIXES = (
+    "cf_",
+    "__cf",
+)
+LEONARDO_AUTH_STORAGE_HINTS = (
+    "better-auth",
+    "auth",
+    "session",
+    "user",
+    "jwt",
+    "token",
+)
+
+
+def _is_leonardo_cf_cookie_name(name: Any) -> bool:
+    n = str(name or "").strip()
+    nl = n.lower()
+    if n in LEONARDO_CF_COOKIE_NAMES:
+        return True
+    return any(nl.startswith(prefix.lower()) for prefix in LEONARDO_CF_COOKIE_PREFIXES)
+
+
+def _is_leonardo_auth_cookie_name(name: Any) -> bool:
+    n = str(name or "").strip()
+    nl = n.lower()
+    if not n or _is_leonardo_cf_cookie_name(n):
+        return False
+    if n in LEONARDO_AUTH_COOKIE_NAMES:
+        return True
+    return any(nl.startswith(prefix.lower()) for prefix in LEONARDO_AUTH_COOKIE_PREFIXES)
+
+
+async def _clear_leonardo_window_site_session(
+    *,
+    client: FPBrowserClient,
+    browser: Any,
+    space: Any,
+    window_key: str,
+) -> Dict[str, Any]:
+    """Clear Leonardo site state before rebinding a fingerprint window to another account."""
+    wk = str(window_key or "").strip()
+    out: Dict[str, Any] = {
+        "success": False,
+        "window_key": wk,
+        "mode": "",
+        "closed_duplicate_pages": 0,
+        "errors": [],
+    }
+    if not wk:
+        out["errors"].append("missing window_key")
+        return out
+
+    conn = None
+    try:
+        conn = await client.get_open_window_connection_info(
+            vendor=browser.vendor,
+            base_url=browser.lan_addr,
+            access_key=browser.access_key,
+            window_key=wk,
+        )
+    except Exception as e:
+        out["errors"].append(f"connection_info failed: {e}")
+
+    if conn:
+        endpoint = str((conn or {}).get("http") or (conn or {}).get("ws") or "").strip()
+        if endpoint and not endpoint.startswith(("http://", "https://", "ws://", "wss://")):
+            endpoint = f"http://{endpoint}"
+        try:
+            from playwright.async_api import async_playwright  # type: ignore
+
+            async with async_playwright() as pw:
+                br = await pw.chromium.connect_over_cdp(endpoint)
+                try:
+                    ctx = br.contexts[0] if br.contexts else None
+                    if ctx is None:
+                        raise RuntimeError("no browser context")
+                    leonardo_pages = [
+                        p
+                        for p in list(ctx.pages or [])
+                        if "app.leonardo.ai" in str(getattr(p, "url", "") or "")
+                    ]
+                    for page in leonardo_pages[1:]:
+                        try:
+                            await page.close()
+                            out["closed_duplicate_pages"] += 1
+                        except Exception as e:
+                            out["errors"].append(f"close duplicate page failed: {e}")
+                    page = leonardo_pages[0] if leonardo_pages else (ctx.pages[0] if ctx.pages else await ctx.new_page())
+                    try:
+                        session = await ctx.new_cdp_session(page)
+                        try:
+                            await session.send("Network.enable")
+                        except Exception:
+                            pass
+                        deleted_cookie_count = 0
+                        try:
+                            cookies = await ctx.cookies(
+                                [
+                                    "https://app.leonardo.ai",
+                                    "https://leonardo.ai",
+                                    "https://api.leonardo.ai",
+                                    "https://auth.leonardo.ai",
+                                ]
+                            )
+                        except Exception as e:
+                            cookies = []
+                            out["errors"].append(f"list cookies failed: {e}")
+                        for cookie in cookies:
+                            cname = str((cookie or {}).get("name") or "").strip()
+                            if not _is_leonardo_auth_cookie_name(cname):
+                                continue
+                            try:
+                                await session.send(
+                                    "Network.deleteCookies",
+                                    {
+                                        "name": cname,
+                                        "domain": str((cookie or {}).get("domain") or "").strip(),
+                                        "path": str((cookie or {}).get("path") or "/").strip() or "/",
+                                    },
+                                )
+                                deleted_cookie_count += 1
+                            except Exception as e:
+                                out["errors"].append(f"delete auth cookie failed: {cname}: {e}")
+                        out["deleted_auth_cookies"] = deleted_cookie_count
+                        for origin in ("https://app.leonardo.ai", "https://leonardo.ai"):
+                            try:
+                                await session.send(
+                                    "Storage.clearDataForOrigin",
+                                    {
+                                        "origin": origin,
+                                        "storageTypes": "local_storage,session_storage,indexeddb,cache_storage,service_workers",
+                                    },
+                                )
+                            except Exception as e:
+                                out["errors"].append(f"cdp app storage clear failed for {origin}: {e}")
+                    except Exception as e:
+                        out["errors"].append(f"cdp soft clear failed: {e}")
+                    try:
+                        await page.goto("about:blank", wait_until="domcontentloaded", timeout=10_000)
+                    except Exception as e:
+                        out["errors"].append(f"blank navigation failed: {e}")
+                    try:
+                        await page.goto(LEONARDO_LOGIN_URL, wait_until="domcontentloaded", timeout=30_000)
+                        await page.evaluate(
+                            """(hints) => {
+                                const shouldDrop = (key, value) => {
+                                    const text = String(key || "") + " " + String(value || "");
+                                    const lower = text.toLowerCase();
+                                    return hints.some((hint) => lower.includes(hint));
+                                };
+                                for (const store of [localStorage, sessionStorage]) {
+                                    try {
+                                        for (const key of Object.keys(store)) {
+                                            const value = store.getItem(key);
+                                            if (shouldDrop(key, value)) store.removeItem(key);
+                                        }
+                                    } catch (e) {}
+                                }
+                            }""",
+                            list(LEONARDO_AUTH_STORAGE_HINTS),
+                        )
+                    except Exception as e:
+                        out["errors"].append(f"page auth storage clear failed: {e}")
+                    out["mode"] = "cdp_soft_auth_clear"
+                    out["success"] = True
+                finally:
+                    try:
+                        await br.close()
+                    except Exception:
+                        pass
+        except Exception as e:
+            out["errors"].append(f"cdp clear failed: {e}")
+
+    if not out["success"]:
+        out["mode"] = out["mode"] or "not_open"
+        out["errors"].append("window is not open; skipped hard local-cache clear to preserve Cloudflare state")
+
+    return out
+
+
+async def _recover_leonardo_login_page(
+    *,
+    client: FPBrowserClient,
+    browser: Any,
+    window_key: str,
+    wait_seconds: float = 3.0,
+) -> Dict[str, Any]:
+    """Reload the Leonardo login page when the visible Turnstile token has gone stale."""
+    wk = str(window_key or "").strip()
+    out: Dict[str, Any] = {
+        "success": False,
+        "window_key": wk,
+        "mode": "login_page_reload",
+        "detected_captcha_failure": False,
+        "page_url": "",
+        "title": "",
+        "errors": [],
+    }
+    if not wk:
+        out["errors"].append("missing window_key")
+        return out
+
+    try:
+        conn = await client.get_open_window_connection_info(
+            vendor=browser.vendor,
+            base_url=browser.lan_addr,
+            access_key=browser.access_key,
+            window_key=wk,
+        )
+    except Exception as e:
+        out["errors"].append(f"connection_info failed: {e}")
+        return out
+    if not conn:
+        out["errors"].append("window is not open")
+        return out
+
+    endpoint = str((conn or {}).get("http") or (conn or {}).get("ws") or "").strip()
+    if endpoint and not endpoint.startswith(("http://", "https://", "ws://", "wss://")):
+        endpoint = f"http://{endpoint}"
+    try:
+        from playwright.async_api import async_playwright  # type: ignore
+
+        async with async_playwright() as pw:
+            br = await pw.chromium.connect_over_cdp(endpoint)
+            try:
+                ctx = br.contexts[0] if br.contexts else None
+                if ctx is None:
+                    raise RuntimeError("no browser context")
+                pages = list(ctx.pages or [])
+                page = next((p for p in pages if "app.leonardo.ai" in str(getattr(p, "url", "") or "")), None)
+                if page is None:
+                    page = pages[0] if pages else await ctx.new_page()
+                try:
+                    body_text = await page.locator("body").inner_text(timeout=3000)
+                except Exception:
+                    body_text = ""
+                lower = body_text.lower()
+                out["detected_captcha_failure"] = (
+                    "captcha verification failed" in lower
+                    or "verify you are a human" in lower
+                    or "please verify you are a human" in lower
+                )
+                try:
+                    await page.goto("about:blank", wait_until="domcontentloaded", timeout=10_000)
+                except Exception as e:
+                    out["errors"].append(f"blank navigation failed: {e}")
+                await page.goto(LEONARDO_LOGIN_URL, wait_until="domcontentloaded", timeout=30_000)
+                await asyncio.sleep(max(0.0, float(wait_seconds or 0.0)))
+                out["page_url"] = str(getattr(page, "url", "") or "")
+                try:
+                    out["title"] = str(await page.title() or "")
+                except Exception:
+                    out["title"] = ""
+                out["success"] = True
+            finally:
+                try:
+                    await br.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        out["errors"].append(f"recover login page failed: {e}")
+    return out
+
+
+async def _leonardo_page_needs_manual_verification(page: Any) -> bool:
+    try:
+        challenge = page.locator(
+            "iframe[src*='challenges.cloudflare.com'], iframe[src*='turnstile']"
+        ).first
+        if await challenge.is_visible(timeout=800):
+            return True
+    except Exception:
+        pass
+    try:
+        body_text = await page.locator("body").inner_text(timeout=2500)
+    except Exception:
+        body_text = ""
+    lower = str(body_text or "").lower()
+    return any(
+        hint in lower
+        for hint in (
+            "captcha verification failed",
+            "verify you are a human",
+            "please verify you are a human",
+            "checking if the site connection is secure",
+            "just a moment",
+            "cf-ray",
+        )
+    )
+
+
+async def _click_leonardo_button(page: Any, patterns: List[str], *, timeout_ms: int = 1500) -> bool:
+    for pattern in patterns:
+        try:
+            btn = page.get_by_role("button", name=re.compile(pattern, re.I)).first
+            if callable(btn):
+                btn = btn()
+            if await btn.is_visible(timeout=timeout_ms):
+                await btn.click(timeout=timeout_ms)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _fill_first_visible_input(page: Any, selectors: List[str], value: str, *, timeout_ms: int = 5000) -> bool:
+    for selector in selectors:
+        try:
+            loc = page.locator(selector).first
+            if callable(loc):
+                loc = loc()
+            if await loc.is_visible(timeout=timeout_ms):
+                await loc.fill(value, timeout=timeout_ms)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _restart_and_login_leonardo_mapping(
+    *,
+    ctx_row: Dict[str, Any],
+    headless: bool = False,
+    wait_after_open_seconds: float = 3.0,
+) -> Dict[str, Any]:
+    """Restart a Leonardo fingerprint window and submit the normal email/password login form.
+
+    This intentionally does not solve or bypass Cloudflare/Turnstile. If a manual
+    verification screen is detected, the browser is left open and the result says so.
+    """
+    vendor = str(ctx_row.get("vendor") or "roxy").strip()
+    base_url = str(ctx_row.get("lan_addr") or "").strip()
+    access_key = ctx_row.get("access_key")
+    space_id = str(ctx_row.get("space_id") or "").strip()
+    window_key = str(ctx_row.get("window_key") or "").strip()
+    username = str(ctx_row.get("platform_username") or ctx_row.get("platform_account") or "").strip()
+    password = str(ctx_row.get("platform_password") or "").strip()
+    pure_mode = _effective_browser_pure_mode(ctx_row, None)
+
+    out: Dict[str, Any] = {
+        "success": False,
+        "window_key": window_key,
+        "closed": False,
+        "reopened": False,
+        "login_attempted": False,
+        "login_submitted": False,
+        "already_logged_in": False,
+        "manual_verification_required": False,
+        "missing_credentials": False,
+        "page_url": "",
+        "title": "",
+        "errors": [],
+    }
+    if not base_url or not space_id or not window_key:
+        out["errors"].append("mapping missing lan_addr/space_id/window_key")
+        return out
+
+    client = FPBrowserClient()
+    try:
+        await client.browser_close(
+            vendor=vendor,
+            base_url=base_url,
+            access_key=access_key,
+            window_key=window_key,
+        )
+        out["closed"] = True
+    except Exception as e:
+        out["errors"].append(f"browser_close failed: {e}")
+
+    for _ in range(20):
+        try:
+            conn = await client.get_open_window_connection_info(
+                vendor=vendor,
+                base_url=base_url,
+                access_key=access_key,
+                window_key=window_key,
+            )
+            if not conn:
+                break
+        except Exception:
+            break
+        await asyncio.sleep(0.5)
+
+    raw_endpoint = ""
+    try:
+        rsp = await client.browser_open(
+            vendor=vendor,
+            base_url=base_url,
+            access_key=access_key,
+            space_id=space_id,
+            window_key=window_key,
+            args=[],
+            force_open=True,
+            headless=bool(headless),
+            pure_mode=bool(pure_mode),
+        )
+        if (rsp or {}).get("code") == 0:
+            out["reopened"] = True
+        data = (rsp or {}).get("data") or {}
+        raw_endpoint = str(data.get("http") or data.get("ws") or "").strip()
+    except Exception as e:
+        out["errors"].append(f"browser_open failed: {e}")
+
+    if not raw_endpoint:
+        try:
+            conn = await client.get_open_window_connection_info(
+                vendor=vendor,
+                base_url=base_url,
+                access_key=access_key,
+                window_key=window_key,
+            )
+            raw_endpoint = str((conn or {}).get("http") or (conn or {}).get("ws") or "").strip()
+            if raw_endpoint:
+                out["reopened"] = True
+        except Exception as e:
+            out["errors"].append(f"connection_info after open failed: {e}")
+    if not raw_endpoint:
+        out["errors"].append("missing CDP endpoint after browser_open")
+        return out
+
+    try:
+        from playwright.async_api import async_playwright  # type: ignore
+        from ..services.playwright_broswer_context import normalize_cdp_endpoint  # type: ignore
+
+        endpoint = normalize_cdp_endpoint(raw_endpoint, base_url=base_url)
+        if wait_after_open_seconds > 0:
+            await asyncio.sleep(float(wait_after_open_seconds))
+        async with async_playwright() as pw:
+            br = await pw.chromium.connect_over_cdp(endpoint)
+            try:
+                ctx = br.contexts[0] if br.contexts else await br.new_context()
+                pages = list(ctx.pages or [])
+                page = next((p for p in pages if "leonardo.ai" in str(getattr(p, "url", "") or "")), None)
+                page = page or (pages[0] if pages else await ctx.new_page())
+                await page.goto(LEONARDO_LOGIN_URL, wait_until="domcontentloaded", timeout=45_000)
+                await asyncio.sleep(2.0)
+
+                if await _leonardo_page_needs_manual_verification(page):
+                    out["manual_verification_required"] = True
+                    return out
+
+                out["page_url"] = str(getattr(page, "url", "") or "")
+                try:
+                    out["title"] = str(await page.title() or "")
+                except Exception:
+                    out["title"] = ""
+                if "/auth/" not in out["page_url"]:
+                    out["already_logged_in"] = True
+                    out["success"] = True
+                    return out
+
+                if not username or not password:
+                    out["missing_credentials"] = True
+                    out["errors"].append("missing Leonardo username/password for this mapping")
+                    return out
+
+                out["login_attempted"] = True
+                await _click_leonardo_button(page, [r"continue\s+with\s+email", r"email"], timeout_ms=1200)
+                await asyncio.sleep(0.8)
+
+                if await _leonardo_page_needs_manual_verification(page):
+                    out["manual_verification_required"] = True
+                    return out
+
+                email_filled = await _fill_first_visible_input(
+                    page,
+                    [
+                        "input[type='email']",
+                        "input[name='email']",
+                        "input[autocomplete='email']",
+                        "input[placeholder*='@']",
+                        "input[placeholder*='name']",
+                    ],
+                    username,
+                    timeout_ms=7000,
+                )
+                if email_filled:
+                    await _click_leonardo_button(page, [r"continue", r"next"], timeout_ms=2500)
+                    await asyncio.sleep(1.5)
+
+                if await _leonardo_page_needs_manual_verification(page):
+                    out["manual_verification_required"] = True
+                    return out
+
+                password_filled = await _fill_first_visible_input(
+                    page,
+                    ["input[type='password']", "input[name='password']", "input[autocomplete='current-password']"],
+                    password,
+                    timeout_ms=12_000,
+                )
+                if not password_filled:
+                    if await _leonardo_page_needs_manual_verification(page):
+                        out["manual_verification_required"] = True
+                    else:
+                        out["errors"].append("password input not found")
+                    return out
+
+                if await _leonardo_page_needs_manual_verification(page):
+                    out["manual_verification_required"] = True
+                    return out
+
+                clicked = await _click_leonardo_button(
+                    page,
+                    [r"log\s*in", r"sign\s*in", r"continue"],
+                    timeout_ms=4000,
+                )
+                if not clicked:
+                    try:
+                        await page.keyboard.press("Enter")
+                        clicked = True
+                    except Exception as e:
+                        out["errors"].append(f"submit login failed: {e}")
+                out["login_submitted"] = bool(clicked)
+                await asyncio.sleep(5.0)
+                if await _leonardo_page_needs_manual_verification(page):
+                    out["manual_verification_required"] = True
+
+                out["page_url"] = str(getattr(page, "url", "") or "")
+                try:
+                    out["title"] = str(await page.title() or "")
+                except Exception:
+                    out["title"] = ""
+                out["success"] = bool(out["login_submitted"]) and not bool(out["manual_verification_required"])
+            finally:
+                try:
+                    await br.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        out["errors"].append(f"restart login failed: {e}")
+
+    return out
+
+
+@router.post("/api/admin/task-type-windows/{mapping_id}/leonardo-recover-login")
+async def recover_leonardo_mapping_login(mapping_id: int, token: str = Depends(verify_admin_token)):
+    if not db:
+        raise HTTPException(status_code=500, detail="db not initialized")
+    ctx_row = await db.get_task_type_window_context(mapping_id)
+    if not ctx_row:
+        raise HTTPException(status_code=404, detail="mapping not found")
+    handler = str(ctx_row.get("create_task_handler") or "").strip().lower()
+    if handler != "leonardo_workflow":
+        raise HTTPException(status_code=400, detail="mapping is not Leonardo")
+    window_key = str(ctx_row.get("window_key") or "").strip()
+    browser = SimpleNamespace(
+        vendor=str(ctx_row.get("vendor") or "roxy"),
+        lan_addr=str(ctx_row.get("lan_addr") or ""),
+        access_key=ctx_row.get("access_key"),
+    )
+    client = FPBrowserClient()
+    result = await _recover_leonardo_login_page(client=client, browser=browser, window_key=window_key)
+    return result
+
+
+@router.post("/api/admin/task-type-windows/{mapping_id}/leonardo-restart-login")
+async def restart_leonardo_mapping_login(
+    mapping_id: int,
+    headless: bool = False,
+    token: str = Depends(verify_admin_token),
+):
+    if not db:
+        raise HTTPException(status_code=500, detail="db not initialized")
+    ctx_row = await db.get_task_type_window_context(mapping_id)
+    if not ctx_row:
+        raise HTTPException(status_code=404, detail="mapping not found")
+    handler = str(ctx_row.get("create_task_handler") or "").strip().lower()
+    if handler != "leonardo_workflow":
+        raise HTTPException(status_code=400, detail="mapping is not Leonardo")
+    return await _restart_and_login_leonardo_mapping(ctx_row=ctx_row, headless=headless)
+
+
 def _remote_account_row_id(row: Dict[str, Any]) -> int:
     if not isinstance(row, dict):
         return 0
@@ -3278,13 +3921,25 @@ async def set_window_account(
         if not selected:
             raise HTTPException(status_code=404, detail="account not found")
 
-    return await _mdf_window_account_and_proxy_from_local(
+    result = await _mdf_window_account_and_proxy_from_local(
         space_pk=space_pk,
         window_key=window_key,
         selected_account=selected,
         clear_account=(account_id <= 0),
         require_local_account=False,
     )
+    if selected is not None and _is_leonardo_account(selected):
+        space = await db.get_space(space_pk)
+        browser = await db.get_browser(space.browser_id) if space else None
+        if space and browser:
+            client = FPBrowserClient()
+            result["clear_session_result"] = await _clear_leonardo_window_site_session(
+                client=client,
+                browser=browser,
+                space=space,
+                window_key=window_key,
+            )
+    return result
 
 
 @router.post("/api/admin/spaces/{space_pk}/windows/{window_key}/sync-account")
@@ -4639,16 +5294,46 @@ async def refresh_mapping_remaining_quota(
             raise HTTPException(status_code=400, detail=str(e))
         handler_used = (task_type.refresh_quota_handler or "").strip() or "noop"
 
+    is_auto_refresh = str(source or "").strip().lower() == "auto"
     ctx_row["_headless"] = headless
     try:
         new_remaining = await fn(RefreshQuotaContext(task_type=task_type, mapping_row=ctx_row, db=db))
         new_remaining = max(0, int(new_remaining))
     except Exception as e:
-        is_auto = str(source or "").strip().lower() == "auto"
         no_penalty = bool(getattr(e, "no_penalty", False))
+        if not is_auto_refresh and create_handler == "leonardo_workflow":
+            recover_result: Dict[str, Any] = {}
+            try:
+                recover_result = await _restart_and_login_leonardo_mapping(ctx_row=ctx_row, headless=headless)
+            except Exception as recover_exc:
+                recover_result = {"success": False, "errors": [str(recover_exc)]}
+
+            if bool(recover_result.get("manual_verification_required")):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"刷新额度失败：{e}；已关闭并重启该 Leonardo 窗口，登录流程遇到 CF/人工验证，请在打开的窗口里手动完成验证后再刷新余额。",
+                )
+            if bool(recover_result.get("login_submitted")):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"刷新额度失败：{e}；已关闭并重启该 Leonardo 窗口，并已提交账号密码登录。请等页面登录完成后再刷新余额。",
+                )
+            if bool(recover_result.get("already_logged_in")):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"刷新额度失败：{e}；已关闭并重启该 Leonardo 窗口，窗口当前看起来仍是登录态，请稍后再刷新余额。",
+                )
+            if bool(recover_result.get("missing_credentials")):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"刷新额度失败：{e}；已重启窗口并打开登录页，但该窗口绑定记录缺少 Leonardo 账号密码。",
+                )
+            recover_errors = "; ".join(str(x) for x in (recover_result.get("errors") or []) if str(x).strip())
+            recover_suffix = f"；重启登录也失败：{recover_errors}" if recover_errors else "；已尝试重启登录但未能确认结果"
+            raise HTTPException(status_code=400, detail=f"刷新额度失败：{e}{recover_suffix}")
 
         # 手工触发：不做风控/熔断副作用，仅返回错误即可
-        if not is_auto:
+        if not is_auto_refresh:
             raise HTTPException(status_code=400, detail=f"刷新额度失败：{e}")
 
         # 定时触发：记录错误日志，并累计窗口连续错误；达到阈值才禁用
@@ -4696,7 +5381,13 @@ async def refresh_mapping_remaining_quota(
         raise HTTPException(status_code=400, detail=f"刷新额度失败：{e}{suffix}")
 
 
-    await db.update_task_type_window(mapping_id=mapping_id, remaining_quota=new_remaining)
+    update_kwargs: Dict[str, Any] = {"remaining_quota": new_remaining}
+    if not is_auto_refresh:
+        if create_handler == "leonardo_workflow" and not str(ctx_row.get("platform_account") or "").strip():
+            update_kwargs["enabled"] = False
+        else:
+            update_kwargs["enabled"] = True
+    await db.update_task_type_window(mapping_id=mapping_id, **update_kwargs)
     # 一次成功：连续错误清零（手工/定时都可清零）
     try:
         await db.mark_mapping_success(mapping_id=mapping_id)
@@ -6433,6 +7124,55 @@ async def list_task_timeline_items(
         task_type_code=task_type_code,
     )
     return {"success": True, **data}
+
+
+@router.get("/api/admin/tasks/{task_id}")
+async def get_admin_task_detail(
+    task_id: str,
+    token: str = Depends(verify_admin_token),
+):
+    await _ensure_page_access(token, "tasks")
+    if not db:
+        raise HTTPException(status_code=500, detail="db not initialized")
+
+    tid = str(task_id or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="task_id is required")
+
+    async with db._read_conn() as conn:
+        conn.row_factory = __import__("aiosqlite").Row
+        cur = await conn.execute(
+            """
+            SELECT
+              t.task_id,
+              t.task_type_code,
+              t.generation_id,
+              t.status,
+              t.progress,
+              t.prompt,
+              t.window_pk,
+              t.window_ip,
+              w.platform_account AS window_account,
+              w.window_sort_num AS window_sort_num,
+              s.name AS space_name,
+              t.error_message,
+              t.content_violation,
+              t.result_json,
+              t.created_at,
+              t.updated_at
+            FROM tasks t
+            LEFT JOIN windows w ON w.id = t.window_pk
+            LEFT JOIN spaces s ON s.id = w.space_pk
+            WHERE t.task_id = ?
+            LIMIT 1
+            """,
+            (tid,),
+        )
+        row = await cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="task not found")
+    return {"success": True, "item": dict(row)}
 
 
 # -------------------- logs --------------------

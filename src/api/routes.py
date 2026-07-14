@@ -96,6 +96,12 @@ OPENAI_COMPAT_VIDEO_MODELS = (
     "seedance-2",
     "seedance-2-fast",
     "seedance-2-mini",
+    "dreamina-seedance-2",
+    "dreamina-seedance-2-fast",
+    "dreamina-seedance-2-mini",
+    "seedance-2-dreamina",
+    "seedance-2-fast-dreamina",
+    "seedance-2-mini-dreamina",
     *LEONARDO_PUBLIC_MODEL_ALIASES.keys(),
     "nana-banana-2",
     "nana-banana-pro",
@@ -122,6 +128,14 @@ VEO31_VIDEO_MODEL_KEYS: Dict[str, str] = {
     "veo-3-1-fast": "veo_3_1_fast",
     "veo-3-1-lite": "veo_3_1_lite",
     "veo-3-1-quality": "veo_3_1_quality",
+}
+DREAMINA_PUBLIC_MODEL_ALIASES: Dict[str, str] = {
+    "dreamina-seedance-2": "seedance-2",
+    "dreamina-seedance-2-fast": "seedance-2-fast",
+    "dreamina-seedance-2-mini": "seedance-2-mini",
+    "seedance-2-dreamina": "seedance-2",
+    "seedance-2-fast-dreamina": "seedance-2-fast",
+    "seedance-2-mini-dreamina": "seedance-2-mini",
 }
 I2V_VIDEO_MODES = {"i2v", "image_to_video", "img2vid", "img2video", "first_frame", "first-frame"}
 GPT_IMAGE2_VIDEO_MODELS: Dict[str, str] = {
@@ -173,6 +187,7 @@ GPT_IMAGE2_SIZE_TABLE: Dict[str, Dict[str, str]] = {
 }
 GPT_ASSET_MAX_BYTES = 80 * 1024 * 1024
 GPT_ASSET_SIGN_TTL_SEC = max(60, int(os.getenv("GPT_ASSET_SIGN_TTL_SEC", "86400")))
+LEONARDO_ASSET_MAX_BYTES = max(GPT_ASSET_MAX_BYTES, int(os.getenv("LEONARDO_ASSET_MAX_BYTES", str(80 * 1024 * 1024))))
 GPT_PUBLIC_ASSET_DIR = DATA_DIR / "gpt_assets"
 GPT_PUBLIC_ASSET_MAX_BYTES = GPT_ASSET_MAX_BYTES
 GPT_PUBLIC_ASSET_EXT_BY_TYPE = {
@@ -613,11 +628,13 @@ def _normalize_video_task_payload(payload: Dict[str, Any]) -> tuple[str, Dict[st
     payload = dict(payload or {})
     model = str(payload.get("model") or "").strip()
     model_key = model.lower()
-    if model_key in {"seedance-2", "seedance-2-fast", "seedance-2-mini"}:
+    if model_key in DREAMINA_PUBLIC_MODEL_ALIASES:
         task_type_code = "dreamina_workflow"
-    elif model_key in LEONARDO_PUBLIC_MODEL_ALIASES:
+        payload["model"] = DREAMINA_PUBLIC_MODEL_ALIASES[model_key]
+        payload["model_name"] = DREAMINA_PUBLIC_MODEL_ALIASES[model_key]
+    elif model_key in {"seedance-2", "seedance-2-fast", "seedance-2-mini"} or model_key in LEONARDO_PUBLIC_MODEL_ALIASES:
         task_type_code = "leonardo_workflow"
-        leonardo_model = LEONARDO_PUBLIC_MODEL_ALIASES[model_key]
+        leonardo_model = LEONARDO_PUBLIC_MODEL_ALIASES.get(model_key) or model_key
         payload["model"] = leonardo_model
         payload["leonardo_model"] = leonardo_model
     elif model_key in {"nana-banana-2"}:
@@ -842,17 +859,47 @@ def _is_gpt_estuary_url(url: str) -> bool:
     return parsed.scheme == "https" and host == "chatgpt.com" and path.startswith("/backend-api/estuary/content")
 
 
+def _is_leonardo_cdn_url(url: str) -> bool:
+    try:
+        parsed = urlparse(str(url or "").strip())
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    path = (parsed.path or "").lower()
+    return parsed.scheme == "https" and host == "cdn.leonardo.ai" and path.startswith("/users/")
+
+
+def _asset_source_kind(url: str) -> Optional[str]:
+    if _is_gpt_estuary_url(url):
+        return "gpt"
+    if _is_leonardo_cdn_url(url):
+        return "leonardo"
+    return None
+
+
+def _task_asset_sources(result: Any) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for url in _public_result_source_urls(result):
+        kind = _asset_source_kind(url)
+        if not kind or url in seen:
+            continue
+        seen.add(url)
+        out.append((url, kind))
+    return out
+
+
 def _gpt_asset_sig(task_id: str, asset_index: int, exp: int) -> str:
     msg = f"{task_id}:{int(asset_index)}:{int(exp)}".encode("utf-8")
     key = str(config.api_key or "").encode("utf-8")
     return hmac.new(key, msg, hashlib.sha256).hexdigest()
 
 
-def _build_gpt_asset_proxy_urls(task_id: str, result: Any) -> list[str]:
+def _build_task_asset_proxy_urls(task_id: str, result: Any) -> list[str]:
     tid = str(task_id or "").strip()
     if not tid:
         return []
-    sources = [u for u in _public_result_source_urls(result) if _is_gpt_estuary_url(u)]
+    sources = _task_asset_sources(result)
     if not sources:
         return []
     exp = int(time.time()) + GPT_ASSET_SIGN_TTL_SEC
@@ -1050,9 +1097,40 @@ def _payload_contains_gpt_estuary_url(payload: Any) -> bool:
     return False
 
 
+def _payload_contains_leonardo_cdn_url(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+
+    values: list[Any] = []
+    for key in ("image_url", "url", "share_url", "video_url"):
+        values.append(payload.get(key))
+    for key in ("result_urls", "urls"):
+        val = payload.get(key)
+        if isinstance(val, list):
+            values.extend(val)
+
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("result_urls", "urls"):
+            val = metadata.get(key)
+            if isinstance(val, list):
+                values.extend(val)
+
+    result = payload.get("result")
+    if isinstance(result, dict):
+        values.extend(_public_result_source_urls(result))
+
+    for value in values:
+        url = _public_one_url(value)
+        if url and _is_leonardo_cdn_url(url):
+            return True
+    return False
+
+
 def _add_public_result_urls(payload: Dict[str, Any], result: Any) -> Dict[str, Any]:
     video_url, image_url, result_urls = _extract_public_result_urls(result)
-    proxy_urls = _build_gpt_asset_proxy_urls(str(payload.get("task_id") or payload.get("id") or ""), result)
+    source_items = _task_asset_sources(result)
+    proxy_urls = _build_task_asset_proxy_urls(str(payload.get("task_id") or payload.get("id") or ""), result)
     if not result_urls and not proxy_urls:
         return payload
 
@@ -1073,11 +1151,18 @@ def _add_public_result_urls(payload: Dict[str, Any], result: Any) -> Dict[str, A
     if proxy_urls:
         metadata["proxy_urls"] = proxy_urls
         payload["proxy_urls"] = proxy_urls
-        payload["proxy_image_url"] = proxy_urls[0]
+        first_kind = source_items[0][1] if source_items else ""
+        if first_kind == "leonardo":
+            payload["proxy_video_url"] = proxy_urls[0]
+        else:
+            payload["proxy_image_url"] = proxy_urls[0]
         response_result = payload.get("result")
         if isinstance(response_result, dict):
             response_result["proxy_urls"] = proxy_urls
-            response_result["proxy_image_url"] = proxy_urls[0]
+            if first_kind == "leonardo":
+                response_result["proxy_video_url"] = proxy_urls[0]
+            else:
+                response_result["proxy_image_url"] = proxy_urls[0]
     return payload
 
 
@@ -1141,9 +1226,17 @@ def _add_absolute_proxy_urls(payload: Dict[str, Any], request: Request) -> Dict[
         return out
 
     absolute = [_absolute_url(request, u) for u in proxy_urls]
+    has_gpt_asset = _payload_contains_gpt_estuary_url(out)
+    has_leonardo_asset = _payload_contains_leonardo_cdn_url(out)
     out["proxy_urls_absolute"] = absolute
-    out["proxy_image_url_absolute"] = absolute[0]
-    if _payload_contains_gpt_estuary_url(out):
+    if has_leonardo_asset:
+        out["proxy_video_url_absolute"] = absolute[0]
+        out["video_url"] = absolute[0]
+        out["url"] = absolute[0]
+        out["result_urls"] = absolute
+    else:
+        out["proxy_image_url_absolute"] = absolute[0]
+    if has_gpt_asset:
         out["image_url"] = absolute[0]
         out["url"] = absolute[0]
         out["result_urls"] = absolute
@@ -1152,7 +1245,9 @@ def _add_absolute_proxy_urls(payload: Dict[str, Any], request: Request) -> Dict[
     if isinstance(metadata, dict):
         metadata = dict(metadata)
         metadata["proxy_urls_absolute"] = absolute
-        if _payload_contains_gpt_estuary_url(out):
+        if has_leonardo_asset:
+            metadata["result_urls"] = absolute
+        if has_gpt_asset:
             metadata["result_urls"] = absolute
         out["metadata"] = metadata
 
@@ -1160,8 +1255,18 @@ def _add_absolute_proxy_urls(payload: Dict[str, Any], request: Request) -> Dict[
     if isinstance(result, dict):
         result = dict(result)
         result["proxy_urls_absolute"] = absolute
-        result["proxy_image_url_absolute"] = absolute[0]
-        if _payload_contains_gpt_estuary_url(result):
+        result_has_gpt_asset = _payload_contains_gpt_estuary_url(result)
+        result_has_leonardo_asset = _payload_contains_leonardo_cdn_url(result)
+        if result_has_leonardo_asset:
+            result["proxy_video_url_absolute"] = absolute[0]
+            result["share_url"] = absolute[0]
+            result["video_url"] = absolute[0]
+            result["url"] = absolute[0]
+            result["urls"] = absolute
+            result["result_urls"] = absolute
+        else:
+            result["proxy_image_url_absolute"] = absolute[0]
+        if result_has_gpt_asset:
             result["image_url"] = absolute[0]
             result["url"] = absolute[0]
             result["result_urls"] = absolute
@@ -1190,7 +1295,7 @@ def _request_has_valid_gpt_asset_auth(request: Request, task_id: str, asset_inde
     return hmac.compare_digest(sig, expected)
 
 
-async def _get_gpt_asset_source_url(task_id: str, asset_index: int) -> str:
+async def _get_task_asset_source(task_id: str, asset_index: int) -> tuple[str, str]:
     if not db:
         raise HTTPException(status_code=500, detail="db not initialized")
     tid = str(task_id or "").strip()
@@ -1206,7 +1311,7 @@ async def _get_gpt_asset_source_url(task_id: str, asset_index: int) -> str:
     task = await db.get_task(tid)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
-    sources = [u for u in _public_result_source_urls(task.result) if _is_gpt_estuary_url(u)]
+    sources = _task_asset_sources(task.result)
     if idx >= len(sources):
         raise HTTPException(status_code=404, detail="asset not found")
     return sources[idx]
@@ -1306,6 +1411,72 @@ async def _fetch_gpt_asset_bytes(source_url: str, access_token: str) -> tuple[by
     if not (content_type.startswith("image/") or content_type == "application/octet-stream"):
         raise HTTPException(status_code=502, detail=f"GPT asset returned unexpected content-type: {content_type}")
     return data, content_type or "application/octet-stream"
+
+
+def _asset_ext_for_media_type(media_type: str, source_url: str) -> str:
+    mt = str(media_type or "").split(";", 1)[0].strip().lower()
+    by_type = {
+        "image/avif": ".avif",
+        "image/gif": ".gif",
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/png": ".png",
+        "image/svg+xml": ".svg",
+        "image/webp": ".webp",
+        "video/mp4": ".mp4",
+        "video/quicktime": ".mov",
+        "video/webm": ".webm",
+    }
+    if mt in by_type:
+        return by_type[mt]
+    path = (urlparse(str(source_url or "")).path or "").lower()
+    for ext in (".mp4", ".mov", ".webm", ".avif", ".gif", ".jpg", ".jpeg", ".png", ".svg", ".webp"):
+        if path.endswith(ext):
+            return ".jpg" if ext == ".jpeg" else ext
+    return ".bin"
+
+
+def _media_type_for_asset_response(media_type: str, source_url: str) -> str:
+    mt = str(media_type or "").split(";", 1)[0].strip().lower()
+    if mt and mt != "application/octet-stream":
+        return mt
+    ext = _asset_ext_for_media_type(media_type, source_url)
+    by_ext = {
+        ".avif": "image/avif",
+        ".gif": "image/gif",
+        ".jpg": "image/jpeg",
+        ".png": "image/png",
+        ".svg": "image/svg+xml",
+        ".webp": "image/webp",
+        ".mp4": "video/mp4",
+        ".mov": "video/quicktime",
+        ".webm": "video/webm",
+    }
+    return by_ext.get(ext, mt or "application/octet-stream")
+
+
+async def _fetch_leonardo_asset_bytes(source_url: str) -> tuple[bytes, str]:
+    headers = {
+        "Accept": "video/mp4,video/webm,video/*,*/*;q=0.8",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+            resp = await client.get(source_url, headers=headers)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"failed to fetch Leonardo asset: {e}")
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Leonardo asset fetch failed with HTTP {resp.status_code}")
+
+    data = resp.content or b""
+    if len(data) > LEONARDO_ASSET_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Leonardo asset is too large")
+    content_type = _media_type_for_asset_response(str(resp.headers.get("content-type") or ""), source_url)
+    if not (content_type.startswith("video/") or content_type == "application/octet-stream"):
+        raise HTTPException(status_code=502, detail=f"Leonardo asset returned unexpected content-type: {content_type}")
+    return data, content_type
 
 
 @router.get("/public/gpt-assets/{filename}")
@@ -1737,15 +1908,22 @@ async def get_task_asset(task_id: str, asset_index: int, request: Request):
     if not _request_has_valid_gpt_asset_auth(request, task_id, asset_index):
         raise HTTPException(status_code=401, detail="Missing or invalid API key / asset signature")
 
-    source_url = await _get_gpt_asset_source_url(task_id, asset_index)
-    access_token = await _load_gpt_asset_access_token(task_id)
-    data, media_type = await _fetch_gpt_asset_bytes(source_url, access_token)
+    source_url, source_kind = await _get_task_asset_source(task_id, asset_index)
+    if source_kind == "gpt":
+        access_token = await _load_gpt_asset_access_token(task_id)
+        data, media_type = await _fetch_gpt_asset_bytes(source_url, access_token)
+    elif source_kind == "leonardo":
+        data, media_type = await _fetch_leonardo_asset_bytes(source_url)
+    else:
+        raise HTTPException(status_code=404, detail="asset not found")
+
+    ext = _asset_ext_for_media_type(media_type, source_url)
     return Response(
         content=data,
         media_type=media_type,
         headers={
             "Cache-Control": "private, max-age=300",
-            "Content-Disposition": f'inline; filename="{task_id}-{asset_index}.png"',
+            "Content-Disposition": f'inline; filename="{task_id}-{asset_index}{ext}"',
             "X-Content-Type-Options": "nosniff",
         },
     )

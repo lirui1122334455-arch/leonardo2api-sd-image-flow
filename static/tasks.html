@@ -325,6 +325,34 @@
         return "";
       }
 
+      function updateCachedTask(item) {
+        if (!item || !item.task_id) return item;
+        const tid = String(item.task_id || "");
+        const idx = state.items.findIndex(x => String(x.task_id || "") === tid);
+        if (idx >= 0) state.items[idx] = { ...state.items[idx], ...item };
+        return item;
+      }
+
+      async function fetchTaskDetail(taskId) {
+        const tid = String(taskId || "").trim();
+        if (!tid) throw new Error("task_id 为空");
+        const r = await adminFetch(`/api/admin/tasks/${encodeURIComponent(tid)}`);
+        if (!r) throw new Error("请求被取消");
+        const d = await r.json();
+        if (!r.ok || !d?.success) throw new Error(d?.detail || "读取任务详情失败");
+        return updateCachedTask(d.item || {});
+      }
+
+      function prettyJsonText(raw) {
+        const text = typeof raw === "string" ? raw : "";
+        if (!text.trim()) return "";
+        try {
+          return JSON.stringify(JSON.parse(text), null, 2);
+        } catch (_) {
+          return text;
+        }
+      }
+
       /** 与后端 sora_task_executor._pick_n_frames 对齐 */
       function pickNFrames(v) {
         let iv;
@@ -461,45 +489,56 @@
         }
       }
 
-      function openResultModal(taskId) {
+      async function openResultModal(taskId) {
         if (!resultModal) return;
-        const item = state.items.find(x => String(x.task_id || "") === String(taskId || ""));
-        const raw = item ? getResultText(item) : "";
-        let pretty = raw || "-";
-        if (raw) {
-          try {
-            const obj = JSON.parse(raw);
-            pretty = JSON.stringify(obj, null, 2);
-          } catch (_) {
-            // keep raw
-          }
-        }
         resultModalTitle.textContent = `result_json · ${String(taskId || "")}`;
-        resultModalBody.textContent = pretty;
+        resultModalBody.textContent = "加载最新任务详情...";
         resultModal.show();
+
+        let item = state.items.find(x => String(x.task_id || "") === String(taskId || ""));
+        try {
+          item = await fetchTaskDetail(taskId);
+        } catch (e) {
+          toast(e.message || "读取任务详情失败", "error");
+        }
+
+        const raw = item ? getResultText(item) : "";
+        const pretty = prettyJsonText(raw);
+        if (pretty) {
+          resultModalBody.textContent = pretty;
+          return;
+        }
+        const status = String(item?.status || "").trim();
+        resultModalBody.textContent = status
+          ? `-（当前状态：${status}，尚未写入 result_json）`
+          : "-";
       }
 
-      function openPromptModal(taskId) {
+      async function openPromptModal(taskId) {
         if (!promptModal) return;
-        const item = state.items.find(x => String(x.task_id || "") === String(taskId || ""));
-        const raw = item ? getPromptText(item) : "";
-        let pretty = raw || "-";
-        if (raw) {
-          try {
-            const obj = JSON.parse(raw);
-            pretty = JSON.stringify(obj, null, 2);
-          } catch (_) {
-            // keep raw
-          }
-        }
         promptModalTitle.textContent = `prompt_json · ${String(taskId || "")}`;
-        promptModalBody.textContent = pretty;
+        promptModalBody.textContent = "加载最新任务详情...";
         promptModal.show();
+
+        let item = state.items.find(x => String(x.task_id || "") === String(taskId || ""));
+        try {
+          item = await fetchTaskDetail(taskId);
+        } catch (e) {
+          toast(e.message || "读取任务详情失败", "error");
+        }
+
+        const raw = item ? getPromptText(item) : "";
+        promptModalBody.textContent = prettyJsonText(raw) || "-";
       }
 
       async function openErrorModalByTaskId(taskId) {
         if (!errorModal) return;
-        const item = state.items.find(x => String(x.task_id || "") === String(taskId || ""));
+        let item = state.items.find(x => String(x.task_id || "") === String(taskId || ""));
+        try {
+          item = await fetchTaskDetail(taskId);
+        } catch (e) {
+          toast(e.message || "读取任务详情失败", "error");
+        }
         const err = String(item?.error_message || "").trim();
         const windowPk = item?.window_pk;
         const windowAccount = String(item?.window_account || "").trim();
@@ -912,7 +951,7 @@
         await load();
       });
 
-      document.getElementById("body").addEventListener("click", (e) => {
+      document.getElementById("body").addEventListener("click", async (e) => {
         const elWindow = e.target?.closest?.("[data-action='view-window-tasks']");
         if (elWindow) {
           const pkText = String(elWindow.getAttribute("data-window-pk") || "").trim();
@@ -929,19 +968,19 @@
         const elResult = e.target?.closest?.("[data-action='view-result']");
         if (elResult) {
           const taskId = elResult.getAttribute("data-task-id");
-          openResultModal(taskId);
+          await openResultModal(taskId);
           return;
         }
         const elPrompt = e.target?.closest?.("[data-action='view-prompt']");
         if (elPrompt) {
           const taskId = elPrompt.getAttribute("data-task-id");
-          openPromptModal(taskId);
+          await openPromptModal(taskId);
           return;
         }
         const elErr = e.target?.closest?.("[data-action='view-errors']");
         if (elErr) {
           const taskId = elErr.getAttribute("data-task-id");
-          openErrorModalByTaskId(taskId);
+          await openErrorModalByTaskId(taskId);
         }
       });
       if (recentInvalidReqBody) {

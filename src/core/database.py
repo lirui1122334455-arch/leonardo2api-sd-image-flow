@@ -4173,6 +4173,60 @@ class Database:
                   w.window_key,
                   w.window_name,
                   w.platform_account,
+                  COALESCE(
+                    (
+                      SELECT a.platform_username
+                      FROM platform_accounts a
+                      WHERE a.deleted = 0
+                        AND w.platform_account_id IS NOT NULL
+                        AND w.platform_account_id > 0
+                        AND a.account_id = w.platform_account_id
+                      ORDER BY a.updated_at DESC, a.id DESC
+                      LIMIT 1
+                    ),
+                    (
+                      SELECT a.platform_username
+                      FROM platform_accounts a
+                      WHERE a.deleted = 0
+                        AND a.space_pk = w.space_pk
+                        AND TRIM(COALESCE(a.platform_username, '')) <> ''
+                        AND TRIM(COALESCE(a.platform_username, '')) = TRIM(COALESCE(w.platform_account, ''))
+                        AND (
+                          TRIM(COALESCE(a.platform_url, '')) = ''
+                          OR TRIM(COALESCE(w.platform_url, '')) = ''
+                          OR TRIM(COALESCE(a.platform_url, '')) = TRIM(COALESCE(w.platform_url, ''))
+                        )
+                      ORDER BY a.updated_at DESC, a.id DESC
+                      LIMIT 1
+                    )
+                  ) AS platform_username,
+                  COALESCE(
+                    (
+                      SELECT a.platform_password
+                      FROM platform_accounts a
+                      WHERE a.deleted = 0
+                        AND w.platform_account_id IS NOT NULL
+                        AND w.platform_account_id > 0
+                        AND a.account_id = w.platform_account_id
+                      ORDER BY a.updated_at DESC, a.id DESC
+                      LIMIT 1
+                    ),
+                    (
+                      SELECT a.platform_password
+                      FROM platform_accounts a
+                      WHERE a.deleted = 0
+                        AND a.space_pk = w.space_pk
+                        AND TRIM(COALESCE(a.platform_username, '')) <> ''
+                        AND TRIM(COALESCE(a.platform_username, '')) = TRIM(COALESCE(w.platform_account, ''))
+                        AND (
+                          TRIM(COALESCE(a.platform_url, '')) = ''
+                          OR TRIM(COALESCE(w.platform_url, '')) = ''
+                          OR TRIM(COALESCE(a.platform_url, '')) = TRIM(COALESCE(w.platform_url, ''))
+                        )
+                      ORDER BY a.updated_at DESC, a.id DESC
+                      LIMIT 1
+                    )
+                  ) AS platform_password,
                   s.space_id AS space_id,
                   b.vendor,
                   b.lan_addr,
@@ -4785,6 +4839,10 @@ class Database:
                             AND t.code = ?
                             AND m.deleted = 0 AND m.enabled = 1
                             AND w.deleted = 0 AND w.enabled = 1
+                            AND (
+                              t.create_task_handler <> 'leonardo_workflow'
+                              OR TRIM(COALESCE(w.platform_account, '')) <> ''
+                            )
                         ),
                         pool_source AS (
                           SELECT
@@ -4997,6 +5055,10 @@ class Database:
                           AND m.id IN ({placeholders})
                           AND m.deleted = 0 AND m.enabled = 1
                           AND w.deleted = 0 AND w.enabled = 1
+                          AND (
+                            t.create_task_handler <> 'leonardo_workflow'
+                            OR TRIM(COALESCE(w.platform_account, '')) <> ''
+                          )
                           AND w.window_status = 1
                           AND (m.error_cooldown_until IS NULL OR m.error_cooldown_until <= datetime('now','localtime'))
                           AND (m.consecutive_errors < t.continuous_error_threshold)
@@ -5192,6 +5254,10 @@ class Database:
                     AND t.code = ?
                     AND m.deleted = 0 AND m.enabled = 1
                     AND w.deleted = 0 AND w.enabled = 1
+                    AND (
+                      t.create_task_handler <> 'leonardo_workflow'
+                      OR TRIM(COALESCE(w.platform_account, '')) <> ''
+                    )
                 ),
                 pool_source AS (
                   SELECT

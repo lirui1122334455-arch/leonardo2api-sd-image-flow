@@ -614,6 +614,54 @@ class PlaywrightBrowserContext:
         except Exception:
             pass
 
+    async def _fingerprint_window_open_state(self) -> Optional[bool]:
+        try:
+            conn = await self.fp_client.get_open_window_connection_info(
+                vendor=self.vendor,
+                base_url=self.base_url,
+                access_key=self.access_key,
+                window_key=self.window_key,
+            )
+        except Exception:
+            return None
+        return bool(conn)
+
+    async def _cached_handles_alive(self, *, require_page: bool) -> bool:
+        if self.browser is None or self.context is None:
+            return False
+        try:
+            is_connected_fn = getattr(self.browser, "is_connected", None)
+            if callable(is_connected_fn) and not bool(is_connected_fn()):
+                return False
+        except Exception:
+            return False
+
+        try:
+            _ = list(getattr(self.context, "pages", []) or [])
+        except Exception:
+            return False
+
+        if not require_page:
+            return True
+
+        page = self.page
+        try:
+            if page is not None and bool(getattr(page, "is_closed", lambda: False)()):
+                page = None
+        except Exception:
+            page = None
+        if page is None:
+            try:
+                page = await pick_working_page_from_context(self.context)
+                self.page = page
+            except Exception:
+                return False
+        try:
+            await asyncio.wait_for(page.evaluate("() => document.readyState"), timeout=2.0)
+            return True
+        except Exception:
+            return False
+
     async def ensure_open(
         self,
         *,
@@ -628,6 +676,18 @@ class PlaywrightBrowserContext:
         # 优先走“复用已连接的 browser/context”。
         # 但如果用户手动关掉了指纹浏览器，缓存中的句柄会变成“非空但失效”，
         # 这里先做活性检查，避免后续在 new_page/goto 时报 TargetClosedError。
+        if not force_open and self.browser is not None and self.context is not None:
+            window_open = await self._fingerprint_window_open_state()
+            handles_alive = bool(window_open is not False) and await self._cached_handles_alive(require_page=require_page)
+
+            if handles_alive:
+                await self._sync_window_status(True)
+                return
+
+            await self.disconnect_playwright_only()
+            if window_open is False:
+                await self._sync_window_status(False)
+
         if not force_open and self.browser is not None and self.context is not None:
             browser_ok = True
             try:
