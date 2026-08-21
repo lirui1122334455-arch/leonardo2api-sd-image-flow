@@ -102,6 +102,7 @@ CREATE_TASK_HANDLERS: Dict[str, Tuple[str, CreateTaskHandler]] = {
     "dreamina_workflow": ("Dreamina Seedance 视频生成（指纹浏览器：文生/图生；Cookie 鉴权）", create_task__sora_gen_video),
     "fish_audio_workflow": ("Fish Audio TTS（指纹浏览器登录会话）", create_task__sora_gen_video),
     "elevenlabs_workflow": ("ElevenLabs 音效/TTS（指纹浏览器登录会话）", create_task__sora_gen_video),
+    "zarklab_workflow": ("Zark Lab 视频生成（指纹浏览器登录会话）", create_task__sora_gen_video),
 }
 
 
@@ -433,6 +434,46 @@ async def refresh_quota__elevenlabs_credits(ctx: RefreshQuotaContext) -> int:
     return remaining
 
 
+async def refresh_quota__zarklab_credits(ctx: RefreshQuotaContext) -> int:
+    """Zark Lab: quote a default video without generating and read available credits."""
+    row = ctx.mapping_row or {}
+    space_id = str(row.get("space_id") or "")
+    window_key = str(row.get("window_key") or "")
+    base_url = str(row.get("lan_addr") or "").strip()
+    if not space_id or not window_key or not base_url:
+        raise RuntimeError("mapping missing lan_addr/space_id/window_key; cannot read Zark Lab credits")
+
+    from .zarklab_task_executor import DEFAULT_ZARKLAB_TARGET, zarklab_fetch_credits
+
+    def _row_bool(key: str, default: bool = False) -> bool:
+        value = row.get(key)
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    info = await zarklab_fetch_credits(
+        browser_vendor=str(row.get("vendor") or "roxy"),
+        browser_base_url=base_url,
+        browser_access_key=row.get("access_key"),
+        space_id=space_id,
+        window_key=window_key,
+        target_url=str(row.get("default_target_url") or "").strip() or DEFAULT_ZARKLAB_TARGET,
+        headless=_row_bool("_headless", _row_bool("headless", False)),
+        pure_mode=_row_bool("pure_mode", True),
+    )
+    remaining = int(info.get("remaining_quota") or 0)
+    await ctx.db.update_task_type_window(
+        mapping_id=int(row.get("id") or row.get("mapping_id") or 0),
+        remaining_quota=remaining,
+        sora_remaining_count=remaining,
+    )
+    return remaining
+
+
 REFRESH_QUOTA_HANDLERS: Dict[str, Tuple[str, RefreshQuotaHandler]] = {
     "noop": ("默认：不刷新（保持当前值）", refresh_quota__noop),
     "reset_to_daily": ("示例：重置为 daily_quota", refresh_quota__reset_to_daily),
@@ -442,6 +483,7 @@ REFRESH_QUOTA_HANDLERS: Dict[str, Tuple[str, RefreshQuotaHandler]] = {
     "gpt_balance": ("GPT/ChatGPT：两层代理刷新余额/账号信息（需长 AT）", refresh_quota__gpt_balance),
     "leonardo_tokens": ("Leonardo：读取 Fast Tokens（GraphQL）", refresh_quota__leonardo_tokens),
     "elevenlabs_credits": ("ElevenLabs：读取网页订阅剩余额度", refresh_quota__elevenlabs_credits),
+    "zarklab_credits": ("Zark Lab：不生成内容，读取可用 credits", refresh_quota__zarklab_credits),
 }
 
 

@@ -199,6 +199,7 @@ from .gpt_task_executor import gpt_workflow, refresh_gpt_balance_via_extension, 
 from .leonardo_task_executor import DEFAULT_LEONARDO_TARGET, leonardo_workflow
 from .fish_audio_task_executor import fish_audio_workflow
 from .elevenlabs_task_executor import elevenlabs_workflow
+from .zarklab_task_executor import zarklab_workflow
 
 
 @dataclass
@@ -311,6 +312,10 @@ def _remaining_quota_exclusive_floor_for_pick(
         credit_threthold = _dreamina_estimated_credit_cost(payload)
         return credit_threthold, credit_threthold
     if code == "leonardo_workflow":
+        return 1, credit_threthold
+    if code == "zarklab_video":
+        if _is_no_submit_payload(payload):
+            return 0, 0
         return 1, credit_threthold
     if code == "fish_audio_workflow":
         return 1, credit_threthold
@@ -3556,6 +3561,7 @@ class TaskService:
                     and (stage_due or progress_due)
                 )
                 leonardo_generation_id = ""
+                zarklab_run_id = ""
                 if picked.create_task_handler == "leonardo_workflow":
                     leonardo_generation_id = str(payload_info.get("generation_id") or "").strip()
                     if leonardo_generation_id:
@@ -3568,8 +3574,14 @@ class TaskService:
                         if resume_meta:
                             payload["_leonardo_resume_meta"] = resume_meta
                         self._task_payloads[task_id] = payload
+                elif picked.create_task_handler == "zarklab_workflow":
+                    zarklab_run_id = str(payload_info.get("run_id") or "").strip()
+                    if zarklab_run_id:
+                        payload["_zark_run_id"] = zarklab_run_id
+                        self._task_payloads[task_id] = payload
+                provider_generation_id = leonardo_generation_id or zarklab_run_id
                 generation_due = bool(
-                    leonardo_generation_id and leonardo_generation_id != _last_saved_generation_id
+                    provider_generation_id and provider_generation_id != _last_saved_generation_id
                 )
                 if not progress_due and not runtime_progress_due and not generation_due:
                     return
@@ -3587,7 +3599,7 @@ class TaskService:
                             }
                         }
                     if generation_due:
-                        update_kwargs["generation_id"] = leonardo_generation_id
+                        update_kwargs["generation_id"] = provider_generation_id
                     if update_kwargs:
                         await self.db.update_task(task_id, **update_kwargs)
                     if progress_due:
@@ -3595,7 +3607,7 @@ class TaskService:
                     if stage_due:
                         _last_saved_stage = stage
                     if generation_due:
-                        _last_saved_generation_id = leonardo_generation_id
+                        _last_saved_generation_id = provider_generation_id
                 except Exception:
                     pass
 
@@ -3719,6 +3731,26 @@ class TaskService:
                             headless=picked.headless,
                             access_token=picked.sora_access_token,
                             access_expires=picked.sora_access_expires,
+                            pure_mode=picked.pure_mode,
+                            db=self.db,
+                            task_type_window_id=picked.mapping_id,
+                        ),
+                        timeout=float(picked.timeout_seconds),
+                    )
+                elif picked.create_task_handler == "zarklab_workflow":
+                    zarklab_payload = dict(payload or {})
+                    result = await asyncio.wait_for(
+                        zarklab_workflow(
+                            zarklab_payload,
+                            progress_cb,
+                            browser_vendor=picked.browser_vendor,
+                            browser_base_url=picked.browser_base_url,
+                            browser_access_key=picked.browser_access_key,
+                            space_id=picked.space_id,
+                            window_key=picked.window_key,
+                            timeout_seconds=float(picked.timeout_seconds),
+                            default_target_url=picked.default_target_url,
+                            headless=picked.headless,
                             pure_mode=picked.pure_mode,
                             db=self.db,
                             task_type_window_id=picked.mapping_id,

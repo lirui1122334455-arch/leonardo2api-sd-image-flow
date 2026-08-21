@@ -72,6 +72,85 @@
                 </select>
                 <div class="text-muted small">VEOomni 的 duration 支持 4 / 6 / 8 / 10；Veo 3.1 Lite/Fast/Quality 当前固定 8 秒。填写图片链接或 images/Ingredients_images 会走参考图视频。</div>
               </div>
+              <div class="mb-3" id="zarklabModelWrap" style="display: none;">
+                <hr class="my-3" />
+                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                  <h6 class="mb-0">Zark 视频参数</h6>
+                  <div class="btn-group btn-group-sm" role="group" aria-label="Zark 素材模式">
+                    <input class="btn-check" type="radio" name="zarklabReferenceMode" id="zarklabModeReferences" value="references" checked />
+                    <label class="btn btn-outline-primary" for="zarklabModeReferences">多参考素材</label>
+                    <input class="btn-check" type="radio" name="zarklabReferenceMode" id="zarklabModeFrames" value="frames" />
+                    <label class="btn btn-outline-primary" for="zarklabModeFrames">首尾帧</label>
+                  </div>
+                </div>
+                <div class="row g-2">
+                  <div class="col-12 col-md-6">
+                    <label class="form-label" for="zarklabModel">模型</label>
+                    <select class="form-select" id="zarklabModel">
+                      <option value="zark-seedance-2.5">Seedance 2.5</option>
+                      <option value="zark-seedance-2.0-lite">Seedance 2.0 Lite</option>
+                      <option value="zark-seedance-2.0-mini">Seedance 2.0 Mini</option>
+                      <option value="zark-seedance-2.0">Seedance 2.0</option>
+                      <option value="zark-minimax-h3">MiniMax H3</option>
+                    </select>
+                  </div>
+                  <div class="col-6 col-md-3">
+                    <label class="form-label" for="zarklabDuration">时长</label>
+                    <select class="form-select" id="zarklabDuration"></select>
+                  </div>
+                  <div class="col-6 col-md-3">
+                    <label class="form-label" for="zarklabResolution">清晰度</label>
+                    <select class="form-select" id="zarklabResolution"></select>
+                  </div>
+                  <div class="col-6 col-md-6">
+                    <label class="form-label" for="zarklabAspectRatio">画面比例</label>
+                    <select class="form-select" id="zarklabAspectRatio"></select>
+                  </div>
+                  <div class="col-6 col-md-6">
+                    <label class="form-label" for="zarklabSound">声音</label>
+                    <select class="form-select" id="zarklabSound"></select>
+                  </div>
+                </div>
+                <div class="text-muted small mt-2" id="zarklabCapabilityHint" aria-live="polite"></div>
+
+                <div id="zarklabReferenceInputs" class="mt-3">
+                  <div class="mb-2">
+                    <label class="form-label" id="zarklabReferenceImageLabel" for="zarklabReferenceImageUrls">参考图片链接</label>
+                    <textarea class="form-control mono" id="zarklabReferenceImageUrls" rows="3" placeholder="每行一个 https://... 图片链接"></textarea>
+                  </div>
+                  <div class="mb-2">
+                    <label class="form-label" id="zarklabReferenceVideoLabel" for="zarklabReferenceVideoUrls">参考视频链接</label>
+                    <textarea class="form-control mono" id="zarklabReferenceVideoUrls" rows="3" placeholder="每行一个 https://... 视频链接"></textarea>
+                  </div>
+                  <div class="mb-2">
+                    <label class="form-label" id="zarklabReferenceAudioLabel" for="zarklabReferenceAudioUrls">参考音频链接</label>
+                    <textarea class="form-control mono" id="zarklabReferenceAudioUrls" rows="3" placeholder="每行一个 https://... 音频链接"></textarea>
+                  </div>
+                  <div>
+                    <label class="form-label" for="zarklabFileIds">已上传文件 ID（可选）</label>
+                    <textarea class="form-control mono" id="zarklabFileIds" rows="2" placeholder="每行一个 Zark file ID"></textarea>
+                  </div>
+                </div>
+
+                <div id="zarklabFrameInputs" class="mt-3" style="display: none;">
+                  <div class="row g-2">
+                    <div class="col-12 col-md-6">
+                      <label class="form-label" for="zarklabStartFrameUrl">首帧图片链接</label>
+                      <input class="form-control mono" id="zarklabStartFrameUrl" placeholder="https://..." />
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label" for="zarklabEndFrameUrl">尾帧图片链接（可选）</label>
+                      <input class="form-control mono" id="zarklabEndFrameUrl" placeholder="https://..." />
+                    </div>
+                  </div>
+                  <div class="text-muted small mt-1">只填首帧时生成图生视频；同时填写首帧和尾帧时按两个端点插值。</div>
+                </div>
+
+                <div class="form-check mt-3">
+                  <input class="form-check-input" type="checkbox" id="zarklabDryRun" />
+                  <label class="form-check-label" for="zarklabDryRun">只报价，不提交生成</label>
+                </div>
+              </div>
               <div class="mb-3" id="cardKeyWrap">
                 <label class="form-label">卡密（可选）</label>
                 <select class="form-select mono" id="cardKeySelect">
@@ -540,6 +619,19 @@
         testDreaminaImageUploadWorkflow: `${LS_PREFIX}test.dreamina_image_upload_workflow`,
         testDuration: `${LS_PREFIX}test.duration`,
         testVideoModel: `${LS_PREFIX}test.video_model`,
+        testZarklabModel: `${LS_PREFIX}test.zarklab.model`,
+        testZarklabDuration: `${LS_PREFIX}test.zarklab.duration`,
+        testZarklabResolution: `${LS_PREFIX}test.zarklab.resolution`,
+        testZarklabAspectRatio: `${LS_PREFIX}test.zarklab.aspect_ratio`,
+        testZarklabSound: `${LS_PREFIX}test.zarklab.sound`,
+        testZarklabReferenceMode: `${LS_PREFIX}test.zarklab.reference_mode`,
+        testZarklabStartFrameUrl: `${LS_PREFIX}test.zarklab.start_frame_url`,
+        testZarklabEndFrameUrl: `${LS_PREFIX}test.zarklab.end_frame_url`,
+        testZarklabReferenceImageUrls: `${LS_PREFIX}test.zarklab.reference_image_urls`,
+        testZarklabReferenceVideoUrls: `${LS_PREFIX}test.zarklab.reference_video_urls`,
+        testZarklabReferenceAudioUrls: `${LS_PREFIX}test.zarklab.reference_audio_urls`,
+        testZarklabFileIds: `${LS_PREFIX}test.zarklab.file_ids`,
+        testZarklabDryRun: `${LS_PREFIX}test.zarklab.dry_run`,
         testLeonardoModel: `${LS_PREFIX}test.leonardo_model`,
         testLeonardoResolution: `${LS_PREFIX}test.leonardo_resolution`,
         testLeonardoAspect: `${LS_PREFIX}test.leonardo_aspect`,
@@ -636,6 +728,44 @@
         "seedance-2": ["720p", "1080p", "4k"],
       };
 
+      const ZARKLAB_MODEL_CAPABILITIES = {
+        "zark-seedance-2.5": {
+          durationMin: 4, durationMax: 30,
+          resolutions: ["480p", "720p"],
+          ratios: ["auto", "16:9", "21:9", "4:3", "1:1", "3:4", "9:16"],
+          sounds: ["on", "off"],
+          maxImages: 30, maxVideos: 10, maxAudios: 10, maxTotal: 50,
+        },
+        "zark-seedance-2.0-lite": {
+          durationMin: 4, durationMax: 15,
+          resolutions: ["480p", "720p"],
+          ratios: ["auto", "16:9", "21:9", "4:3", "1:1", "3:4", "9:16"],
+          sounds: ["on", "off"],
+          maxImages: 9, maxVideos: 3, maxAudios: 3, maxTotal: 12,
+        },
+        "zark-seedance-2.0-mini": {
+          durationMin: 4, durationMax: 15,
+          resolutions: ["480p", "720p"],
+          ratios: ["auto", "16:9", "21:9", "4:3", "1:1", "3:4", "9:16"],
+          sounds: ["on", "off"],
+          maxImages: 9, maxVideos: 3, maxAudios: 3, maxTotal: 12,
+        },
+        "zark-seedance-2.0": {
+          durationMin: 4, durationMax: 15,
+          resolutions: ["480p", "720p", "1080p", "4k"],
+          ratios: ["auto", "16:9", "21:9", "4:3", "1:1", "3:4", "9:16"],
+          sounds: ["on", "off"],
+          maxImages: 9, maxVideos: 3, maxAudios: 3, maxTotal: 12,
+        },
+        "zark-minimax-h3": {
+          durationMin: 5, durationMax: 15,
+          resolutions: ["768P", "2K", "4K"],
+          ratios: ["16:9", "21:9", "4:3", "1:1", "3:4", "9:16"],
+          sounds: ["on"],
+          maxImages: 9, maxVideos: 3, maxAudios: 3, maxTotal: 12,
+        },
+      };
+
       function isGptType(typeCode) {
         const t = taskTypeByCode.get(typeCode);
         return typeCode === "gpt_workflow" || String(t?.create_task_handler || "").trim() === "gpt_workflow";
@@ -649,6 +779,11 @@
       function isDreaminaType(typeCode) {
         const t = taskTypeByCode.get(typeCode);
         return typeCode === "dreamina_workflow" || String(t?.create_task_handler || "").trim() === "dreamina_workflow";
+      }
+
+      function isZarkLabType(typeCode) {
+        const t = taskTypeByCode.get(typeCode);
+        return typeCode === "zarklab_video" || String(t?.create_task_handler || "").trim() === "zarklab_video";
       }
 
       function isFishAudioType(typeCode) {
@@ -879,6 +1014,52 @@
         return String(value || "").split(/\r?\n|,/).map(x => x.trim()).filter(Boolean);
       }
 
+      function selectedZarklabReferenceMode() {
+        return document.querySelector('input[name="zarklabReferenceMode"]:checked')?.value === "frames" ? "frames" : "references";
+      }
+
+      function replaceSelectOptions(elementId, values, defaultValue, labelFn = value => value) {
+        const el = document.getElementById(elementId);
+        if (!el) return;
+        const previous = String(el.value || "");
+        el.innerHTML = values.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(labelFn(value))}</option>`).join("");
+        el.value = values.includes(previous) ? previous : defaultValue;
+      }
+
+      function syncZarklabCapabilities() {
+        const modelEl = document.getElementById("zarklabModel");
+        const model = String(modelEl?.value || "zark-seedance-2.5");
+        const caps = ZARKLAB_MODEL_CAPABILITIES[model] || ZARKLAB_MODEL_CAPABILITIES["zark-seedance-2.5"];
+        const durations = Array.from({ length: caps.durationMax - caps.durationMin + 1 }, (_, index) => String(caps.durationMin + index));
+        replaceSelectOptions("zarklabDuration", durations, String(caps.durationMin), value => `${value} 秒`);
+        replaceSelectOptions("zarklabResolution", caps.resolutions, caps.resolutions[0]);
+        replaceSelectOptions("zarklabAspectRatio", caps.ratios, caps.ratios[0], value => value === "auto" ? "自动" : value);
+        replaceSelectOptions("zarklabSound", caps.sounds, "on", value => value === "on" ? "开启" : "关闭");
+
+        const soundEl = document.getElementById("zarklabSound");
+        if (soundEl) {
+          soundEl.disabled = caps.sounds.length === 1;
+          soundEl.title = caps.sounds.length === 1 ? "MiniMax H3 固定生成声音" : "";
+        }
+        const hint = document.getElementById("zarklabCapabilityHint");
+        if (hint) {
+          const soundText = caps.sounds.length === 1 ? "声音固定开启" : "声音可开关";
+          hint.textContent = `时长 ${caps.durationMin}-${caps.durationMax} 秒；参考图片 ${caps.maxImages} 张、视频 ${caps.maxVideos} 个、音频 ${caps.maxAudios} 个，合计最多 ${caps.maxTotal} 个；${soundText}。`;
+        }
+        const imageLabel = document.getElementById("zarklabReferenceImageLabel");
+        if (imageLabel) imageLabel.textContent = `参考图片链接（最多 ${caps.maxImages} 行）`;
+        const videoLabel = document.getElementById("zarklabReferenceVideoLabel");
+        if (videoLabel) videoLabel.textContent = `参考视频链接（最多 ${caps.maxVideos} 行）`;
+        const audioLabel = document.getElementById("zarklabReferenceAudioLabel");
+        if (audioLabel) audioLabel.textContent = `参考音频链接（最多 ${caps.maxAudios} 行）`;
+
+        const frameMode = selectedZarklabReferenceMode() === "frames";
+        const references = document.getElementById("zarklabReferenceInputs");
+        const frames = document.getElementById("zarklabFrameInputs");
+        if (references) references.style.display = frameMode ? "none" : "";
+        if (frames) frames.style.display = frameMode ? "" : "none";
+      }
+
       function parseDreaminaMediaLines(value, kind) {
         return String(value || "").split(/\r?\n/).map(x => x.trim()).filter(Boolean).map((line) => {
           if (line.startsWith("{")) {
@@ -989,11 +1170,14 @@
         const type = document.getElementById("taskType")?.value || "";
         const isLeonardo = isLeonardoType(type);
         const isDreamina = isDreaminaType(type);
+        const isZarkLab = isZarkLabType(type);
         const isFishAudio = isFishAudioType(type);
         const isElevenLabs = isElevenLabsType(type);
         const isAudioWorkflow = isFishAudio || isElevenLabs;
         const videoModelWrap = document.getElementById("videoModelWrap");
         if (videoModelWrap) videoModelWrap.style.display = type === "veo_workflow" ? "" : "none";
+        const zarklabModelWrap = document.getElementById("zarklabModelWrap");
+        if (zarklabModelWrap) zarklabModelWrap.style.display = isZarkLab ? "" : "none";
         const leonardoModelWrap = document.getElementById("leonardoModelWrap");
         if (leonardoModelWrap) leonardoModelWrap.style.display = isLeonardo ? "" : "none";
         const dreaminaModelWrap = document.getElementById("dreaminaModelWrap");
@@ -1004,16 +1188,16 @@
         if (elevenLabsWrap) elevenLabsWrap.style.display = isElevenLabs ? "" : "none";
         for (const id of ["cardKeyWrap", "videoUrlWrap", "firstImageUrlWrap", "dreaminaImageUploadWorkflowWrap"]) {
           const el = document.getElementById(id);
-          if (el) el.style.display = isAudioWorkflow ? "none" : "";
+          if (el) el.style.display = (isAudioWorkflow || isZarkLab) ? "none" : "";
         }
         const imageAspectRatioWrap = document.getElementById("imageAspectRatioWrap");
-        if (imageAspectRatioWrap) imageAspectRatioWrap.style.display = (isDreamina || isAudioWorkflow) ? "none" : "";
+        if (imageAspectRatioWrap) imageAspectRatioWrap.style.display = (isDreamina || isZarkLab || isAudioWorkflow) ? "none" : "";
         const imageSizeWrap = document.getElementById("imageSizeWrap");
-        if (imageSizeWrap) imageSizeWrap.style.display = (isDreamina || isAudioWorkflow) ? "none" : "";
+        if (imageSizeWrap) imageSizeWrap.style.display = (isDreamina || isZarkLab || isAudioWorkflow) ? "none" : "";
         const imageResolutionWrap = document.getElementById("imageResolutionWrap");
-        if (imageResolutionWrap) imageResolutionWrap.style.display = (isDreamina || isAudioWorkflow) ? "none" : "";
+        if (imageResolutionWrap) imageResolutionWrap.style.display = (isDreamina || isZarkLab || isAudioWorkflow) ? "none" : "";
         const durationWrap = document.getElementById("durationWrap");
-        if (durationWrap) durationWrap.style.display = (isDreamina || isAudioWorkflow) ? "none" : "";
+        if (durationWrap) durationWrap.style.display = (isDreamina || isZarkLab || isAudioWorkflow) ? "none" : "";
         const promptLabel = document.getElementById("promptLabel");
         const elevenMode = selectedElevenMode();
         if (promptLabel) promptLabel.textContent = isFishAudio || (isElevenLabs && elevenMode === "tts") ? "朗读文本" : (isElevenLabs ? "音效描述" : "文本内容");
@@ -1023,6 +1207,7 @@
         if (durationEl) durationEl.placeholder = isGptType(type) ? "GPT image2 auto uses 1" : (isLeonardo ? "8" : (isDreamina ? "4-15" : "5"));
         if (isLeonardo) applyLeonardoDefaultsIfEmpty();
         if (isDreamina) applyDreaminaDefaultsIfEmpty();
+        if (isZarkLab) syncZarklabCapabilities();
         if (isElevenLabs) updateElevenLabsModeUi();
         updateLeonardoSizeOptions();
       }
@@ -1171,6 +1356,7 @@
           const type = document.getElementById("taskType").value;
           const fishAudio = isFishAudioType(type);
           const elevenLabs = isElevenLabsType(type);
+          const zarkLab = isZarkLabType(type);
           const audioWorkflow = fishAudio || elevenLabs;
           const mappingIdRaw = (document.getElementById("taskWindow")?.value || "").trim();
           const prompt = document.getElementById("prompt").value.trim();
@@ -1184,7 +1370,8 @@
           if (!type) throw new Error("请选择任务类型");
           if (fishAudio && !prompt) throw new Error("请输入朗读文本");
           if (elevenLabs && !prompt) throw new Error(selectedElevenMode() === "tts" ? "请输入朗读文本" : "请输入音效描述");
-          if (!audioWorkflow && !prompt && !videoUrl && !(dreaminaImageUploadWorkflow && firstImageUrl)) throw new Error("请输入文本内容、填写 video_url，或勾选单图上传并填写图片链接");
+          if (zarkLab && !prompt) throw new Error("请输入 Zark 视频提示词");
+          if (!audioWorkflow && !zarkLab && !prompt && !videoUrl && !(dreaminaImageUploadWorkflow && firstImageUrl)) throw new Error("请输入文本内容、填写 video_url，或勾选单图上传并填写图片链接");
           // 注意：不同 task handler 可能需要不同字段，这里仅示例常用字段
           const payload = audioWorkflow ? { text: prompt } : { prompt };
           if (fishAudio) {
@@ -1257,20 +1444,20 @@
             }
           }
           if (type === "veo_workflow" && videoModel) payload.model = videoModel;
-          if (!audioWorkflow && videoUrl) payload.video_url = videoUrl;
-          if (!audioWorkflow && dreaminaImageUploadWorkflow) {
+          if (!audioWorkflow && !zarkLab && videoUrl) payload.video_url = videoUrl;
+          if (!audioWorkflow && !zarkLab && dreaminaImageUploadWorkflow) {
             if (!firstImageUrl) throw new Error("Dreamina 单图上传保存需要填写图片链接");
             payload.workflow_kind = "image_upload";
             payload.image_url = firstImageUrl;
-          } else if (!audioWorkflow && firstImageUrl) {
+          } else if (!audioWorkflow && !zarkLab && firstImageUrl) {
             payload.first_image_url = firstImageUrl;
           }
-          if (!audioWorkflow && cardKeyIdRaw) {
+          if (!audioWorkflow && !zarkLab && cardKeyIdRaw) {
             const selected = cardKeys.find(x => String(x.id) === String(cardKeyIdRaw));
             if (!selected || !selected.card_key) throw new Error("所选卡密不存在，请刷新后重试");
             payload.card_key = String(selected.card_key);
           }
-          if (!audioWorkflow && duration !== undefined && !Number.isNaN(duration)) payload.duration = duration;
+          if (!audioWorkflow && !zarkLab && duration !== undefined && !Number.isNaN(duration)) payload.duration = duration;
           const imageResRaw = (document.getElementById("imageResolution")?.value || "").trim().toLowerCase();
           const imageResolution = (imageResRaw === "2k" || imageResRaw === "4k") ? imageResRaw : "1k";
           const imageAspectRatioRaw = (document.getElementById("imageAspectRatio")?.value || "").trim();
@@ -1291,6 +1478,50 @@
               payload.ratio = imageAspectRatio;
             }
             if (imageSize) payload.size = imageSize;
+          }
+          if (zarkLab) {
+            const zarklabModel = String(document.getElementById("zarklabModel")?.value || "zark-seedance-2.5");
+            const caps = ZARKLAB_MODEL_CAPABILITIES[zarklabModel];
+            if (!caps) throw new Error("Zark 模型配置不存在");
+            const zarklabDuration = Number(document.getElementById("zarklabDuration")?.value || caps.durationMin);
+            const zarklabResolution = String(document.getElementById("zarklabResolution")?.value || caps.resolutions[0]);
+            const zarklabAspectRatio = String(document.getElementById("zarklabAspectRatio")?.value || caps.ratios[0]);
+            const zarklabSound = String(document.getElementById("zarklabSound")?.value || "on");
+            if (!Number.isInteger(zarklabDuration) || zarklabDuration < caps.durationMin || zarklabDuration > caps.durationMax) {
+              throw new Error(`Zark 时长必须在 ${caps.durationMin} 到 ${caps.durationMax} 秒之间`);
+            }
+            if (!caps.resolutions.includes(zarklabResolution)) throw new Error("所选模型不支持这个清晰度");
+            if (!caps.ratios.includes(zarklabAspectRatio)) throw new Error("所选模型不支持这个画面比例");
+            if (!caps.sounds.includes(zarklabSound)) throw new Error("所选模型不支持这个声音选项");
+
+            payload.model = zarklabModel;
+            payload.duration = zarklabDuration;
+            payload.resolution = zarklabResolution;
+            payload.aspect_ratio = zarklabAspectRatio;
+            payload.sound = zarklabSound;
+
+            if (selectedZarklabReferenceMode() === "frames") {
+              const startFrameUrl = String(document.getElementById("zarklabStartFrameUrl")?.value || "").trim();
+              const endFrameUrl = String(document.getElementById("zarklabEndFrameUrl")?.value || "").trim();
+              if (!startFrameUrl) throw new Error("首尾帧模式至少需要填写首帧图片链接");
+              payload.first_image_url = startFrameUrl;
+              if (endFrameUrl) payload.last_image_url = endFrameUrl;
+            } else {
+              const referenceImageUrls = splitLines(document.getElementById("zarklabReferenceImageUrls")?.value || "");
+              const referenceVideoUrls = splitLines(document.getElementById("zarklabReferenceVideoUrls")?.value || "");
+              const referenceAudioUrls = splitLines(document.getElementById("zarklabReferenceAudioUrls")?.value || "");
+              const zarkFileIds = splitLines(document.getElementById("zarklabFileIds")?.value || "");
+              const totalReferences = referenceImageUrls.length + referenceVideoUrls.length + referenceAudioUrls.length + zarkFileIds.length;
+              if (referenceImageUrls.length > caps.maxImages) throw new Error(`参考图片最多 ${caps.maxImages} 张`);
+              if (referenceVideoUrls.length > caps.maxVideos) throw new Error(`参考视频最多 ${caps.maxVideos} 个`);
+              if (referenceAudioUrls.length > caps.maxAudios) throw new Error(`参考音频最多 ${caps.maxAudios} 个`);
+              if (totalReferences > caps.maxTotal) throw new Error(`全部参考素材合计最多 ${caps.maxTotal} 个`);
+              if (referenceImageUrls.length) payload.reference_image_urls = referenceImageUrls;
+              if (referenceVideoUrls.length) payload.reference_video_urls = referenceVideoUrls;
+              if (referenceAudioUrls.length) payload.reference_audio_urls = referenceAudioUrls;
+              if (zarkFileIds.length) payload.zark_file_ids = zarkFileIds;
+            }
+            if (document.getElementById("zarklabDryRun")?.checked === true) payload.dry_run = true;
           }
           if (isDreaminaType(type)) {
             const dreaminaModel = (document.getElementById("dreaminaModel")?.value || DREAMINA_TEST_DEFAULTS.model).trim();
@@ -1506,6 +1737,43 @@
           el.addEventListener(eventName, (e) => lsSet(key, e.target.value || ""));
           return el;
         };
+        const zarklabModelEl = bindValueCache("zarklabModel", LS_KEYS.testZarklabModel, "change");
+        syncZarklabCapabilities();
+        bindValueCache("zarklabDuration", LS_KEYS.testZarklabDuration, "change");
+        bindValueCache("zarklabResolution", LS_KEYS.testZarklabResolution, "change");
+        bindValueCache("zarklabAspectRatio", LS_KEYS.testZarklabAspectRatio, "change");
+        bindValueCache("zarklabSound", LS_KEYS.testZarklabSound, "change");
+        bindValueCache("zarklabStartFrameUrl", LS_KEYS.testZarklabStartFrameUrl);
+        bindValueCache("zarklabEndFrameUrl", LS_KEYS.testZarklabEndFrameUrl);
+        bindValueCache("zarklabReferenceImageUrls", LS_KEYS.testZarklabReferenceImageUrls);
+        bindValueCache("zarklabReferenceVideoUrls", LS_KEYS.testZarklabReferenceVideoUrls);
+        bindValueCache("zarklabReferenceAudioUrls", LS_KEYS.testZarklabReferenceAudioUrls);
+        bindValueCache("zarklabFileIds", LS_KEYS.testZarklabFileIds);
+        const savedZarklabMode = lsGet(LS_KEYS.testZarklabReferenceMode) === "frames" ? "frames" : "references";
+        const savedZarklabModeEl = document.querySelector(`input[name="zarklabReferenceMode"][value="${savedZarklabMode}"]`);
+        if (savedZarklabModeEl) savedZarklabModeEl.checked = true;
+        for (const modeEl of document.querySelectorAll('input[name="zarklabReferenceMode"]')) {
+          modeEl.addEventListener("change", (e) => {
+            if (!e.target.checked) return;
+            lsSet(LS_KEYS.testZarklabReferenceMode, e.target.value || "references");
+            syncZarklabCapabilities();
+          });
+        }
+        const zarklabDryRunEl = document.getElementById("zarklabDryRun");
+        if (zarklabDryRunEl) {
+          zarklabDryRunEl.checked = lsGet(LS_KEYS.testZarklabDryRun) === "1";
+          zarklabDryRunEl.addEventListener("change", (e) => lsSet(LS_KEYS.testZarklabDryRun, e.target.checked ? "1" : "0"));
+        }
+        if (zarklabModelEl) {
+          zarklabModelEl.addEventListener("change", () => {
+            syncZarklabCapabilities();
+            lsSet(LS_KEYS.testZarklabDuration, document.getElementById("zarklabDuration")?.value || "");
+            lsSet(LS_KEYS.testZarklabResolution, document.getElementById("zarklabResolution")?.value || "");
+            lsSet(LS_KEYS.testZarklabAspectRatio, document.getElementById("zarklabAspectRatio")?.value || "");
+            lsSet(LS_KEYS.testZarklabSound, document.getElementById("zarklabSound")?.value || "on");
+          });
+        }
+        syncZarklabCapabilities();
         const dreaminaModelEl = bindValueCache("dreaminaModel", LS_KEYS.testDreaminaModel, "change");
         bindValueCache("dreaminaResolution", LS_KEYS.testDreaminaResolution, "change");
         syncDreaminaResolutionOptions();

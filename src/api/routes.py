@@ -33,6 +33,7 @@ from ..core.public_api_limits import (
     normalize_server_count,
 )
 from ..services.leonardo_task_executor import LEONARDO_PUBLIC_MODEL_ALIASES
+from ..services.zarklab_task_executor import ZARKLAB_PUBLIC_MODEL_ALIASES
 from ..services.task_service import TaskService
 from ..services.task_handler_registry import CreateTaskContext, get_create_task_handler
 
@@ -103,6 +104,7 @@ OPENAI_COMPAT_VIDEO_MODELS = (
     "seedance-2-fast-dreamina",
     "seedance-2-mini-dreamina",
     *LEONARDO_PUBLIC_MODEL_ALIASES.keys(),
+    *ZARKLAB_PUBLIC_MODEL_ALIASES.keys(),
     "nana-banana-2",
     "nana-banana-pro",
     "veo-3-1",
@@ -629,7 +631,11 @@ def _normalize_video_task_payload(payload: Dict[str, Any]) -> tuple[str, Dict[st
     payload = dict(payload or {})
     model = str(payload.get("model") or "").strip()
     model_key = model.lower()
-    if model_key in DREAMINA_PUBLIC_MODEL_ALIASES:
+    if model_key in ZARKLAB_PUBLIC_MODEL_ALIASES:
+        task_type_code = "zarklab_video"
+        payload["model"] = model_key
+        payload["zarklab_model"] = ZARKLAB_PUBLIC_MODEL_ALIASES[model_key]
+    elif model_key in DREAMINA_PUBLIC_MODEL_ALIASES:
         task_type_code = "dreamina_workflow"
         payload["model"] = DREAMINA_PUBLIC_MODEL_ALIASES[model_key]
         payload["model_name"] = DREAMINA_PUBLIC_MODEL_ALIASES[model_key]

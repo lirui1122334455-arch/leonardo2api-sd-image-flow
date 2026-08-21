@@ -98,6 +98,13 @@ def _admin_manual_open_target_url(ctx_row: Dict[str, Any]) -> str:
             return str(DEFAULT_ELEVENLABS_TARGET or "").strip() or "https://elevenlabs.io/app/sound-effects"
         except Exception:
             return "https://elevenlabs.io/app/sound-effects"
+    if handler == "zarklab_workflow":
+        try:
+            from ..services.zarklab_task_executor import DEFAULT_ZARKLAB_TARGET  # type: ignore
+
+            return str(DEFAULT_ZARKLAB_TARGET or "").strip() or "https://www.zarklab.ai/"
+        except Exception:
+            return "https://www.zarklab.ai/"
     return "https://sora.chatgpt.com/drafts"
 
 

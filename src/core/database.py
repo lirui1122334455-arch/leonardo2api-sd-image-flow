@@ -694,6 +694,30 @@ class Database:
                 ),
             )
 
+        # Zark Lab video channel. Window mappings remain explicit so startup
+        # never attaches an unrelated logged-in fingerprint window.
+        cur = await db.execute("SELECT COUNT(*) FROM task_types WHERE code = ?", ("zarklab_video",))
+        if int((await cur.fetchone())[0] or 0) == 0:
+            await db.execute(
+                """
+                INSERT INTO task_types (
+                    name, code, project_id, concurrency,
+                    continuous_error_threshold, continuous_error_close_window_threshold,
+                    timeout_seconds, window_call_cooldown_seconds,
+                    create_task_handler, refresh_quota_handler,
+                    default_target_url, enabled, deleted
+                )
+                VALUES (?, ?, NULL, 1, 3, 3, 1800, 30, ?, ?, ?, 1, 0)
+                """,
+                (
+                    "Zark Lab video",
+                    "zarklab_video",
+                    "zarklab_workflow",
+                    "zarklab_credits",
+                    "https://www.zarklab.ai/",
+                ),
+            )
+
     async def check_and_migrate_db(self, config_dict: Dict[str, Any]) -> None:
         """升级模式：补齐缺失表/列，并确保默认行存在。"""
         async with aiosqlite.connect(self.db_path) as db:
@@ -5328,6 +5352,7 @@ class Database:
                     prefer_low_quota,
                 ),
             )
+
             rows = await cur.fetchall()
             return [int(r["mapping_id"]) for r in rows]
 

@@ -40,11 +40,11 @@ class FishAudioTestUiTests(unittest.TestCase):
         html = TEST_PAGE.read_text(encoding="utf-8")
 
         self.assertIn('payload.reference_id = referenceId;', html)
-        self.assertIn('const payload = fishAudio ? { text: prompt } : { prompt };', html)
+        self.assertIn('const payload = audioWorkflow ? { text: prompt } : { prompt };', html)
         self.assertIn('.concat(d?.audio_url || [])', html)
         self.assertIn('<audio src="${escapeHtml(audioUrl)}"', html)
-        self.assertIn('if (!fishAudio && cardKeyIdRaw)', html)
-        self.assertIn('if (!fishAudio && duration !== undefined', html)
+        self.assertIn('if (!audioWorkflow && !zarkLab && cardKeyIdRaw)', html)
+        self.assertIn('if (!audioWorkflow && !zarkLab && duration !== undefined', html)
 
 
 if __name__ == "__main__":
