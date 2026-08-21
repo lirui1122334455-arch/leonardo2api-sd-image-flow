@@ -15,7 +15,7 @@ import random
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, unquote, unquote_to_bytes, urlencode, urlparse, urlunparse
 
 import httpx
@@ -461,7 +461,11 @@ async def _leonardo_cookie_session_state(page: Any) -> Dict[str, Any]:
         "cf_access_token_expires_at": None,
         "better_auth_session_present": False,
         "better_auth_session_count": 0,
+        "better_auth_session_ttl_seconds": None,
+        "better_auth_session_expires_at": None,
         "better_auth_session_data_count": 0,
+        "better_auth_session_data_ttl_seconds": None,
+        "better_auth_session_data_expires_at": None,
     }
     try:
         context = getattr(page, "context", None)
@@ -486,13 +490,25 @@ async def _leonardo_cookie_session_state(page: Any) -> Dict[str, Any]:
     ttl: Optional[int] = None
     if expires_at is not None:
         ttl = max(0, int(expires_at - now))
-    session_names = {
-        name
-        for name in names
-        if name == LEONARDO_BETTER_AUTH_SESSION_COOKIE
-        or name.startswith(f"{LEONARDO_BETTER_AUTH_SESSION_COOKIE}.")
-    }
-    data_count = sum(1 for name in names if name.startswith(LEONARDO_BETTER_AUTH_DATA_PREFIX))
+    session_cookies = [
+        c
+        for c in (cookies or [])
+        if str((c or {}).get("name") or "") == LEONARDO_BETTER_AUTH_SESSION_COOKIE
+        or str((c or {}).get("name") or "").startswith(f"{LEONARDO_BETTER_AUTH_SESSION_COOKIE}.")
+    ]
+    session_names = {str((c or {}).get("name") or "") for c in session_cookies}
+    session_data_cookies = [
+        c
+        for c in (cookies or [])
+        if str((c or {}).get("name") or "").startswith(LEONARDO_BETTER_AUTH_DATA_PREFIX)
+    ]
+
+    def earliest_expiry(items: List[Dict[str, Any]]) -> Optional[float]:
+        values = [value for value in (_cookie_expiry_timestamp(item) for item in items) if value is not None]
+        return min(values) if values else None
+
+    session_expires_at = earliest_expiry(session_cookies)
+    session_data_expires_at = earliest_expiry(session_data_cookies)
     out.update(
         {
             "cookies_checked": True,
@@ -502,7 +518,19 @@ async def _leonardo_cookie_session_state(page: Any) -> Dict[str, Any]:
             "cf_access_token_expires_at": int(expires_at) if expires_at is not None else None,
             "better_auth_session_present": bool(session_names),
             "better_auth_session_count": len(session_names),
-            "better_auth_session_data_count": int(data_count),
+            "better_auth_session_ttl_seconds": (
+                max(0, int(session_expires_at - now)) if session_expires_at is not None else None
+            ),
+            "better_auth_session_expires_at": (
+                int(session_expires_at) if session_expires_at is not None else None
+            ),
+            "better_auth_session_data_count": len(session_data_cookies),
+            "better_auth_session_data_ttl_seconds": (
+                max(0, int(session_data_expires_at - now)) if session_data_expires_at is not None else None
+            ),
+            "better_auth_session_data_expires_at": (
+                int(session_data_expires_at) if session_data_expires_at is not None else None
+            ),
         }
     )
     return out
@@ -514,12 +542,15 @@ def _leonardo_cookie_state_summary(state: Dict[str, Any]) -> str:
         return f"cookies=unavailable{(' err=' + err) if err else ''}"
     ttl = state.get("cf_access_token_ttl_seconds")
     ttl_text = "unknown" if ttl is None else str(int(ttl))
+    session_ttl = state.get("better_auth_session_ttl_seconds")
+    session_ttl_text = "unknown" if session_ttl is None else f"{int(session_ttl)}s"
     return (
         f"cookies={int(state.get('cookie_count') or 0)} "
         f"cf_present={bool(state.get('cf_access_token_present'))} "
         f"cf_ttl={ttl_text}s "
         f"better_auth={bool(state.get('better_auth_session_present'))} "
         f"session_tokens={int(state.get('better_auth_session_count') or 0)} "
+        f"session_ttl={session_ttl_text} "
         f"session_data={int(state.get('better_auth_session_data_count') or 0)}"
     )
 
@@ -853,32 +884,53 @@ async def _leonardo_session_ping(page: Any, *, log_file: Path) -> Dict[str, Any]
     }
 
 
-async def _leonardo_auth_session_probe(page: Any, *, timeout_seconds: float = 10.0) -> Dict[str, Any]:
+async def _leonardo_auth_session_probe(
+    page: Any,
+    *,
+    timeout_seconds: float = 10.0,
+    disable_cookie_cache: bool = False,
+) -> Dict[str, Any]:
     """Read Better Auth session presence without returning user or token data."""
     try:
         raw = await asyncio.wait_for(
             page.evaluate(
-                """async () => {
+                """async ({disableCookieCache}) => {
                     try {
-                        const response = await fetch('/api/auth/get-session', {
+                        const toEpochSeconds = (value) => {
+                            if (value === null || value === undefined || value === '') return 0;
+                            if (typeof value === 'number' && Number.isFinite(value)) {
+                                return Math.floor(value > 100000000000 ? value / 1000 : value);
+                            }
+                            const parsed = Date.parse(String(value));
+                            return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+                        };
+                        const query = disableCookieCache ? '?disableCookieCache=true' : '';
+                        const response = await fetch(`/api/auth/get-session${query}`, {
                             method: 'GET',
                             credentials: 'include',
+                            cache: 'no-store',
                             headers: {Accept: 'application/json'}
                         });
                         let value = null;
                         let parsed = false;
                         try { value = await response.json(); parsed = true; } catch (_) {}
                         const objectValue = value && typeof value === 'object' ? value : null;
+                        const sessionValue = objectValue && objectValue.session
+                            && typeof objectValue.session === 'object' ? objectValue.session : null;
                         return {
                             status: response.status,
-                            hasSession: Boolean(objectValue && objectValue.session),
+                            hasSession: Boolean(sessionValue),
                             hasUser: Boolean(objectValue && objectValue.user),
-                            empty: Boolean(parsed && (value === null || (objectValue && Object.keys(objectValue).length === 0)))
+                            empty: Boolean(parsed && (value === null || (objectValue && Object.keys(objectValue).length === 0))),
+                            sessionExpiresAt: toEpochSeconds(sessionValue?.expiresAt ?? sessionValue?.expires_at),
+                            sessionUpdatedAt: toEpochSeconds(sessionValue?.updatedAt ?? sessionValue?.updated_at),
+                            sessionCreatedAt: toEpochSeconds(sessionValue?.createdAt ?? sessionValue?.created_at)
                         };
                     } catch (error) {
                         return {status: 0, error: String(error)};
                     }
-                }"""
+                }""",
+                {"disableCookieCache": bool(disable_cookie_cache)},
             ),
             timeout=max(3.0, float(timeout_seconds)),
         )
@@ -887,6 +939,18 @@ async def _leonardo_auth_session_probe(page: Any, *, timeout_seconds: float = 10
     raw = raw if isinstance(raw, dict) else {}
     status = int(raw.get("status") or 0)
     has_identity = bool(raw.get("hasSession") and raw.get("hasUser"))
+    now = int(time.time())
+
+    def safe_epoch(value: Any) -> int:
+        try:
+            parsed = int(value or 0)
+        except Exception:
+            return 0
+        return parsed if 0 < parsed < 100_000_000_000 else 0
+
+    session_expires_at = safe_epoch(raw.get("sessionExpiresAt"))
+    session_updated_at = safe_epoch(raw.get("sessionUpdatedAt"))
+    session_created_at = safe_epoch(raw.get("sessionCreatedAt"))
     if status == 200 and has_identity:
         authenticated: Optional[bool] = True
         authoritative = True
@@ -903,6 +967,13 @@ async def _leonardo_auth_session_probe(page: Any, *, timeout_seconds: float = 10
         "authenticated": authenticated,
         "authoritative": authoritative,
         "status": status,
+        "cookie_cache_bypassed": bool(disable_cookie_cache),
+        "session_expires_at": session_expires_at or None,
+        "session_expires_in_seconds": max(0, session_expires_at - now) if session_expires_at else None,
+        "session_updated_at": session_updated_at or None,
+        "session_updated_age_seconds": max(0, now - session_updated_at) if session_updated_at else None,
+        "session_created_at": session_created_at or None,
+        "session_age_seconds": max(0, now - session_created_at) if session_created_at else None,
         **({"error": safe_trim(str(raw.get("error") or ""), 180)} if raw.get("error") else {}),
     }
 
@@ -1671,6 +1742,7 @@ async def leonardo_keepalive(
     probe_graphql: bool = True,
     active_auth_capture: bool = False,
     auth_session_probe_enabled: bool = True,
+    force_server_session_refresh: bool = False,
     session_ping_enabled: bool = True,
     cf_refresh_ttl_seconds: float = LEONARDO_DEFAULT_CF_REFRESH_TTL_SECONDS,
     ui_mode_toggle: bool = False,
@@ -1754,13 +1826,26 @@ async def leonardo_keepalive(
             append_log(log_file, f"[leonardo] keepalive cookie state: {_leonardo_cookie_state_summary(cookie_before)}")
             cookie_state = cookie_before
             if auth_session_probe_enabled:
-                auth_session = await _leonardo_auth_session_probe(page, timeout_seconds=10.0)
+                auth_session = await _leonardo_auth_session_probe(
+                    page,
+                    timeout_seconds=10.0,
+                    disable_cookie_cache=bool(force_server_session_refresh),
+                )
             else:
                 auth_session = {"authenticated": None, "authoritative": False, "status": 0, "skipped": True}
             authenticated = auth_session.get("authenticated")
+            if force_server_session_refresh:
+                cookie_after_auth = await _leonardo_cookie_session_state(page)
+                if cookie_after_auth.get("cookies_checked"):
+                    cookie_state = cookie_after_auth
             append_log(
                 log_file,
-                f"[leonardo] keepalive auth session: authenticated={authenticated} status={auth_session.get('status')}",
+                f"[leonardo] keepalive auth session: authenticated={authenticated} "
+                f"status={auth_session.get('status')} cache_bypassed={bool(auth_session.get('cookie_cache_bypassed'))} "
+                f"server_expires_in={auth_session.get('session_expires_in_seconds')} "
+                f"server_updated_age={auth_session.get('session_updated_age_seconds')} "
+                f"session_ttl_before={cookie_before.get('better_auth_session_ttl_seconds')} "
+                f"session_ttl_after={cookie_state.get('better_auth_session_ttl_seconds')}",
             )
             ping_info: Dict[str, Any] = {"ok": False, "skipped": True, "reason": "not_due"}
             try:
@@ -3111,6 +3196,18 @@ def _generation_status(generation: Any) -> str:
     return _one_str(generation.get("status")).upper()
 
 
+def _is_leonardo_page_closed_error(exc: BaseException) -> bool:
+    name = exc.__class__.__name__.lower()
+    message = str(exc or "").lower()
+    return (
+        "targetclosed" in name
+        or "target page, context or browser has been closed" in message
+        or "page has been closed" in message
+        or "browser has been closed" in message
+        or "connection closed" in message
+    )
+
+
 async def _poll_generation_until_video(
     page: Any,
     *,
@@ -3119,20 +3216,49 @@ async def _poll_generation_until_video(
     timeout_seconds: float,
     log_file: Path,
     progress_cb: ProgressCB,
+    reconnect_page: Optional[Callable[[], Awaitable[Any]]] = None,
 ) -> Dict[str, Any]:
     started = time.time()
     deadline = started + max(60.0, float(timeout_seconds or 900.0))
     last_snapshot: Dict[str, Any] = {}
     interval = 8.0
+    active_page = page
+    reconnect_attempts = 0
     while time.time() < deadline:
-        obj = await _leonardo_graphql(
-            page,
-            auth_headers=auth_headers,
-            operation_name="LeonardoGenerationById",
-            query=GENERATION_QUERY,
-            variables={"id": generation_id},
-            log_file=log_file,
-        )
+        try:
+            obj = await _leonardo_graphql(
+                active_page,
+                auth_headers=auth_headers,
+                operation_name="LeonardoGenerationById",
+                query=GENERATION_QUERY,
+                variables={"id": generation_id},
+                log_file=log_file,
+            )
+            reconnect_attempts = 0
+        except Exception as exc:
+            if reconnect_page is None or not _is_leonardo_page_closed_error(exc):
+                raise
+            reconnect_attempts += 1
+            if reconnect_attempts > 5:
+                raise NonPenalizedTaskError(
+                    f"Leonardo generation polling could not reconnect after page closure: generation={generation_id}",
+                    status_code=503,
+                ) from exc
+            await progress_cb(
+                10,
+                {
+                    "stage": "poll_reconnect",
+                    "generation_id": generation_id,
+                    "attempt": reconnect_attempts,
+                },
+            )
+            append_log(
+                log_file,
+                f"[leonardo] poll page closed; reconnecting generation={generation_id} attempt={reconnect_attempts}/5",
+            )
+            active_page = await reconnect_page()
+            await asyncio.sleep(min(5.0, float(reconnect_attempts)))
+            continue
         generation = ((obj.get("data") or {}) if isinstance(obj.get("data"), dict) else {}).get("generations_by_pk")
         if isinstance(generation, dict):
             last_snapshot = generation
@@ -3245,6 +3371,24 @@ async def leonardo_workflow(
                     "Leonardo page is not open; please open app.leonardo.ai in the fingerprint browser first.",
                     status_code=401,
                 )
+
+            async def reconnect_poll_page() -> Any:
+                await sess.disconnect_playwright_only()
+                await sess.ensure_open(
+                    args=[target_page],
+                    force_open=False,
+                    headless=headless,
+                    require_page=False,
+                    pure_mode=pure_mode,
+                )
+                restored_page = await _find_or_open_leonardo_page(sess, target_page, log_file=log_file)
+                if restored_page is None:
+                    raise NonPenalizedTaskError(
+                        "Leonardo generation polling could not restore the fingerprint page.",
+                        status_code=503,
+                    )
+                return restored_page
+
             auth_headers: Dict[str, str] = {}
             access_raw = _one_str(p.get("leonardo_access_token") or p.get("access_token") or access_token)
             if access_raw:
@@ -3260,6 +3404,62 @@ async def leonardo_workflow(
                     timeout_seconds=float(p.get("leonardo_auth_capture_timeout_seconds") or 25.0),
                     cache_seconds=float(p.get("leonardo_auth_cache_seconds") or LEONARDO_DEFAULT_AUTH_CACHE_SECONDS),
                 )
+
+            resume_generation_id = _one_str(
+                p.get("_leonardo_generation_id") or p.get("leonardo_generation_id")
+            )
+            if resume_generation_id:
+                resume_meta_raw = p.get("_leonardo_resume_meta")
+                resume_meta = dict(resume_meta_raw) if isinstance(resume_meta_raw, dict) else {}
+                api_credit_cost = resume_meta.pop("api_credit_cost", None)
+                await progress_cb(
+                    10,
+                    {
+                        "stage": "resume_generation",
+                        "generation_id": resume_generation_id,
+                        "api_credit_cost": api_credit_cost,
+                        **meta,
+                        **resume_meta,
+                    },
+                )
+                poll = await _poll_generation_until_video(
+                    page,
+                    auth_headers=auth_headers,
+                    generation_id=resume_generation_id,
+                    timeout_seconds=timeout_seconds,
+                    log_file=log_file,
+                    progress_cb=progress_cb,
+                    reconnect_page=reconnect_poll_page,
+                )
+                elapsed_ms = int(max(0.0, (time.time() - started) * 1000.0))
+                video_url = _one_str(poll.get("video_url"))
+                await progress_cb(
+                    100,
+                    {
+                        "stage": "done",
+                        "generation_id": resume_generation_id,
+                        "video_url": video_url,
+                        "elapsed_ms": elapsed_ms,
+                    },
+                )
+                return {
+                    "type": "leonardo_workflow_video",
+                    "message": "Leonardo Seedance video generation completed",
+                    "share_url": video_url,
+                    "video_url": video_url,
+                    "urls": poll.get("urls") or [video_url],
+                    "workflow_kind": "video",
+                    "video_mode": "v2v" if resume_meta.get("video_reference_count") else ("i2v" if (resume_meta.get("start_frame_count") or resume_meta.get("end_frame_count") or resume_meta.get("image_reference_count") or resume_meta.get("audio_reference_count")) else "t2v"),
+                    "provider": "leonardo",
+                    "model": model,
+                    "model_key": model,
+                    "generation_id": resume_generation_id,
+                    "api_credit_cost": api_credit_cost,
+                    "public": public,
+                    "elapsed_ms": elapsed_ms,
+                    **meta,
+                    **resume_meta,
+                }
 
             reference_guidances, reference_meta = await _build_reference_guidances(
                 page,
@@ -3309,6 +3509,9 @@ async def leonardo_workflow(
                     "stage": "submitted",
                     "generation_id": generation_id,
                     "api_credit_cost": api_credit_cost,
+                    "model": model,
+                    **meta,
+                    **reference_meta,
                 },
             )
             poll = await _poll_generation_until_video(
@@ -3318,6 +3521,7 @@ async def leonardo_workflow(
                 timeout_seconds=timeout_seconds,
                 log_file=log_file,
                 progress_cb=progress_cb,
+                reconnect_page=reconnect_poll_page,
             )
             elapsed_ms = int(max(0.0, (time.time() - started) * 1000.0))
             video_url = _one_str(poll.get("video_url"))

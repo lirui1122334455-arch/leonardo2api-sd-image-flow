@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FPBrowser2API Task Executor",
-  "version": "0.3.5",
+  "version": "0.3.8",
   "description": "Execute VEO/Dreamina tasks from inside the fingerprint browser.",
   "icons": {
     "16": "icons/icon16.png",

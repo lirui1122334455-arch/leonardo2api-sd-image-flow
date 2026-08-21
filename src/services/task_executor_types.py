@@ -27,8 +27,14 @@ class NonPenalizedTaskError(RuntimeError):
         *,
         status_code: Optional[int] = None,
         content_violation: bool = False,
+        submitted: bool = False,
+        retryable: bool = True,
+        stage: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.content_violation = bool(content_violation)
+        self.submitted = bool(submitted)
+        self.retryable = bool(retryable)
+        self.stage = str(stage or "").strip() or None
 

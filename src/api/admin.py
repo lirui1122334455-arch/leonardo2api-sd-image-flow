@@ -25,6 +25,7 @@ from ..core.logger import logger, setup_logging
 from ..core.paths import APP_ROOT, PID_FILE
 from ..core.public_api_limits import normalize_public_create_task_max_inflight
 from ..services.fp_browser_client import FPBrowserClient
+from ..services.fish_audio_voice_catalog import list_fish_audio_voices
 
 router = APIRouter()
 
@@ -83,6 +84,20 @@ def _admin_manual_open_target_url(ctx_row: Dict[str, Any]) -> str:
             return str(DEFAULT_GPT_TARGET or "").strip() or "https://chatgpt.com/"
         except Exception:
             return "https://chatgpt.com/"
+    if handler == "fish_audio_workflow":
+        try:
+            from ..services.fish_audio_task_executor import DEFAULT_FISH_AUDIO_TARGET  # type: ignore
+
+            return str(DEFAULT_FISH_AUDIO_TARGET or "").strip() or "https://fish.audio/zh-CN/app/playground/"
+        except Exception:
+            return "https://fish.audio/zh-CN/app/playground/"
+    if handler == "elevenlabs_workflow":
+        try:
+            from ..services.elevenlabs_task_executor import DEFAULT_ELEVENLABS_TARGET  # type: ignore
+
+            return str(DEFAULT_ELEVENLABS_TARGET or "").strip() or "https://elevenlabs.io/app/sound-effects"
+        except Exception:
+            return "https://elevenlabs.io/app/sound-effects"
     return "https://sora.chatgpt.com/drafts"
 
 
@@ -3693,6 +3708,118 @@ async def restart_leonardo_mapping_login(
     return await _restart_and_login_leonardo_mapping(ctx_row=ctx_row, headless=headless)
 
 
+async def _leonardo_cookie_probe_context(mapping_id: int) -> Dict[str, Any]:
+    if not db:
+        raise HTTPException(status_code=500, detail="db not initialized")
+    ctx_row = await db.get_task_type_window_context(mapping_id)
+    if not ctx_row:
+        raise HTTPException(status_code=404, detail="mapping not found")
+    handler = str(ctx_row.get("create_task_handler") or "").strip().lower()
+    if handler != "leonardo_workflow":
+        raise HTTPException(status_code=400, detail="mapping is not Leonardo")
+    return ctx_row
+
+
+@router.post("/api/admin/task-type-windows/{mapping_id}/leonardo-cookie-probe/capture")
+async def capture_leonardo_cookie_probe(mapping_id: int, token: str = Depends(verify_admin_token)):
+    ctx_row = await _leonardo_cookie_probe_context(mapping_id)
+    try:
+        from ..services.leonardo_cookie_probe import capture_and_probe_leonardo_cookie
+
+        return await asyncio.wait_for(
+            capture_and_probe_leonardo_cookie(mapping_id, ctx_row),
+            timeout=120.0,
+        )
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="Leonardo cookie probe timed out") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/admin/task-type-windows/{mapping_id}/leonardo-cookie-probe/retest")
+async def retest_leonardo_cookie_probe(mapping_id: int, token: str = Depends(verify_admin_token)):
+    await _leonardo_cookie_probe_context(mapping_id)
+    try:
+        from ..services.leonardo_cookie_probe import probe_saved_leonardo_cookie
+
+        return await asyncio.wait_for(
+            probe_saved_leonardo_cookie(mapping_id),
+            timeout=90.0,
+        )
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="Leonardo saved-cookie probe timed out") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/api/admin/task-type-windows/{mapping_id}/leonardo-cookie-probe/status")
+async def leonardo_cookie_probe_status(mapping_id: int, token: str = Depends(verify_admin_token)):
+    await _leonardo_cookie_probe_context(mapping_id)
+    from ..services.leonardo_cookie_probe import get_leonardo_cookie_snapshot_status
+
+    return await get_leonardo_cookie_snapshot_status(mapping_id)
+
+
+@router.post("/api/admin/task-type-windows/{mapping_id}/leonardo-session-check")
+async def check_leonardo_session_now(mapping_id: int, token: str = Depends(verify_admin_token)):
+    """Run the production in-browser session check immediately and return only safe metadata."""
+    await _leonardo_cookie_probe_context(mapping_id)
+    from ..api.routes import task_service as _ts
+
+    if _ts is None:
+        raise HTTPException(status_code=503, detail="task service is not initialized")
+    rows = await _ts._leonardo_keepalive_list_mapping_rows(include_disabled=True)
+    row = next(
+        (
+            item
+            for item in rows
+            if int(item.get("mapping_id") or item.get("id") or 0) == int(mapping_id)
+        ),
+        None,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Leonardo mapping is unavailable")
+
+    _ts._leonardo_keepalive_auth_failures.pop(int(mapping_id), None)
+    _ts._leonardo_keepalive_next_due.pop(int(mapping_id), None)
+    result = await asyncio.wait_for(_ts._leonardo_keepalive_probe_mapping(row), timeout=180.0)
+    result = result if isinstance(result, dict) else {}
+    cookie_state = result.get("cookie_state") if isinstance(result.get("cookie_state"), dict) else {}
+    auth_session = result.get("auth_session") if isinstance(result.get("auth_session"), dict) else {}
+    balance = result.get("balance") if isinstance(result.get("balance"), dict) else {}
+    return {
+        "success": bool(result.get("ok")),
+        "mapping_id": int(mapping_id),
+        "session_state": str(result.get("session_state") or "unknown"),
+        "reason": str(result.get("reason") or ""),
+        "page_url": str(result.get("page_url") or "")[:300],
+        "cookie_state": {
+            "cookie_count": int(cookie_state.get("cookie_count") or 0),
+            "cf_access_token_present": bool(cookie_state.get("cf_access_token_present")),
+            "cf_access_token_ttl_seconds": cookie_state.get("cf_access_token_ttl_seconds"),
+            "better_auth_session_present": bool(cookie_state.get("better_auth_session_present")),
+            "better_auth_session_count": int(cookie_state.get("better_auth_session_count") or 0),
+            "better_auth_session_ttl_seconds": cookie_state.get("better_auth_session_ttl_seconds"),
+            "better_auth_session_data_count": int(cookie_state.get("better_auth_session_data_count") or 0),
+        },
+        "auth_session": {
+            "authenticated": auth_session.get("authenticated"),
+            "authoritative": bool(auth_session.get("authoritative")),
+            "http_status": int(auth_session.get("status") or 0),
+            "cookie_cache_bypassed": bool(auth_session.get("cookie_cache_bypassed")),
+            "session_expires_at": auth_session.get("session_expires_at"),
+            "session_expires_in_seconds": auth_session.get("session_expires_in_seconds"),
+            "session_updated_at": auth_session.get("session_updated_at"),
+            "session_updated_age_seconds": auth_session.get("session_updated_age_seconds"),
+            "session_created_at": auth_session.get("session_created_at"),
+            "session_age_seconds": auth_session.get("session_age_seconds"),
+        },
+        "balance": {
+            "remaining_quota": balance.get("remaining_quota"),
+        },
+    }
+
+
 def _remote_account_row_id(row: Dict[str, Any]) -> int:
     if not isinstance(row, dict):
         return 0
@@ -5127,6 +5254,30 @@ async def list_task_types(include_all: bool = False, token: str = Depends(verify
         raise HTTPException(status_code=500, detail="db not initialized")
     allowed_ids = None if include_all else await _get_allowed_task_type_ids(user)
     return {"success": True, "task_types": [t.model_dump() for t in await db.list_task_types(allowed_task_type_ids=allowed_ids)]}
+
+
+@router.get("/api/admin/fish-audio/voices")
+async def list_admin_fish_audio_voices(
+    source: str = Query("curated", pattern="^(curated|public)$"),
+    q: str = Query("", max_length=100),
+    language: str = Query("", max_length=32),
+    gender: str = Query("", max_length=32),
+    age_group: str = Query("", max_length=32),
+    page: int = Query(1, ge=1, le=10),
+    page_size: int = Query(100, ge=1, le=100),
+    token: str = Depends(verify_admin_token),
+):
+    await _ensure_page_access(token, "test")
+    result = await list_fish_audio_voices(
+        source=source,
+        query=q,
+        language=language,
+        gender=gender,
+        age_group=age_group,
+        page=page,
+        page_size=page_size,
+    )
+    return {"success": True, **result}
 
 
 @router.post("/api/admin/task-types")

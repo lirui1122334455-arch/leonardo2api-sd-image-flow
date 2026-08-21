@@ -219,11 +219,18 @@ async function connectBridge(options = {}) {
       await pushLog("info", "task.start", { task_id: msg.task_id, provider: msg.provider });
       runTask(msg).catch(async (e) => {
         await setStatus({ activeTask: null, lastError: String(e && e.message || e) });
-        await pushLog("error", "task.error", { task_id: msg.task_id, error: String(e && e.message || e) });
+        const error = {
+          message: String(e && e.message || e),
+          status_code: e && e.status_code || 502,
+          submitted: !!(e && e.submitted),
+          retryable: e && e.retryable !== false,
+          stage: String(e && e.stage || "")
+        };
+        await pushLog("error", "task.error", { task_id: msg.task_id, error });
         await send({
           type: "task.error",
           task_id: msg.task_id,
-          error: { message: String(e && e.message || e), status_code: e.status_code || 502 }
+          error
         });
       });
     } else if (msg.type === "ping") {

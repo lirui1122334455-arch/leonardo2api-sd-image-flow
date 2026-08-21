@@ -233,7 +233,15 @@ async def _handle_client_message(client: ExtensionClient, msg: Dict[str, Any]) -
         if "PUBLIC_ERROR_UNUSUAL_ACTIVITY" in message or str((err or {}).get("reason") or "") == "PUBLIC_ERROR_UNUSUAL_ACTIVITY":
             fut.set_exception(RuntimeError(message))
         else:
-            fut.set_exception(NonPenalizedTaskError(message, status_code=status_code))
+            fut.set_exception(
+                NonPenalizedTaskError(
+                    message,
+                    status_code=status_code,
+                    submitted=bool((err or {}).get("submitted")),
+                    retryable=(err or {}).get("retryable") is not False,
+                    stage=str((err or {}).get("stage") or "").strip() or None,
+                )
+            )
 
 
 async def _ping_client_loop(client: ExtensionClient) -> None:

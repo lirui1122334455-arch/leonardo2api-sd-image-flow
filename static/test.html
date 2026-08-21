@@ -11,6 +11,20 @@
       .result-preview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
       .result-preview-grid img { width: 100%; max-height: 320px; object-fit: contain; background: #fff; border: 1px solid #dee2e6; border-radius: 6px; }
       .result-preview-grid video { width: 100%; max-height: 320px; background: #000; border-radius: 6px; }
+      .result-preview-grid .audio-result { grid-column: 1 / -1; }
+      .result-preview-grid .audio-results { grid-column: 1 / -1; border: 1px solid #dee2e6; border-radius: 6px; overflow: hidden; background: #fff; }
+      .audio-results-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid #dee2e6; }
+      .audio-result-row { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 12px; border-bottom: 1px solid #e9ecef; }
+      .audio-result-row:last-child { border-bottom: 0; }
+      .audio-result-row audio { min-width: 0; }
+      .result-preview-grid audio, #fishVoicePreview { width: 100%; }
+      #fishVoiceSelect { min-height: 190px; }
+      .fish-voice-meta { min-height: 44px; }
+      .eleven-fixed-value { min-height: 38px; display: flex; align-items: center; padding: .375rem .75rem; border: 1px solid #dee2e6; border-radius: .375rem; background: #f8f9fa; }
+      @media (max-width: 575.98px) {
+        .audio-result-row { grid-template-columns: 40px minmax(0, 1fr); }
+        .audio-result-row .audio-result-action { grid-column: 2; justify-self: start; }
+      }
     </style>
   </head>
   <body class="bg-light">
@@ -58,7 +72,7 @@
                 </select>
                 <div class="text-muted small">VEOomni 的 duration 支持 4 / 6 / 8 / 10；Veo 3.1 Lite/Fast/Quality 当前固定 8 秒。填写图片链接或 images/Ingredients_images 会走参考图视频。</div>
               </div>
-              <div class="mb-3">
+              <div class="mb-3" id="cardKeyWrap">
                 <label class="form-label">卡密（可选）</label>
                 <select class="form-select mono" id="cardKeySelect">
                   <option value="">不使用卡密</option>
@@ -71,15 +85,212 @@
                 <div class="text-muted small">不选择则由后端按任务类型自动挑选可用窗口（默认机制）。</div>
               </div>
               <div class="mb-3">
-                <label class="form-label">文本内容</label>
+                <label class="form-label" id="promptLabel">文本内容</label>
                 <textarea class="form-control" id="prompt" rows="5" placeholder="输入文本提示词"></textarea>
               </div>
-              <div class="mb-3">
+              <div class="mb-3" id="elevenLabsWrap" style="display: none;">
+                <hr class="my-3" />
+                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                  <h6 class="mb-0">ElevenLabs 参数</h6>
+                  <div class="btn-group btn-group-sm" role="group" aria-label="ElevenLabs 生成模式">
+                    <input class="btn-check" type="radio" name="elevenMode" id="elevenModeSoundEffects" value="sound_effects" checked />
+                    <label class="btn btn-outline-primary" for="elevenModeSoundEffects">音效</label>
+                    <input class="btn-check" type="radio" name="elevenMode" id="elevenModeTts" value="tts" />
+                    <label class="btn btn-outline-primary" for="elevenModeTts">TTS</label>
+                  </div>
+                </div>
+
+                <div id="elevenSoundEffectsFields">
+                  <div class="row g-3">
+                    <div class="col-12 col-md-6">
+                      <label class="form-label" for="elevenDurationSeconds">时长（秒）</label>
+                      <input class="form-control" id="elevenDurationSeconds" type="number" min="0.5" max="30" step="0.5" placeholder="Auto" />
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <div class="d-flex justify-content-between gap-2">
+                        <label class="form-label" for="elevenPromptInfluence">提示词权重</label>
+                        <span class="small text-muted" id="elevenPromptInfluenceValue">30%</span>
+                      </div>
+                      <input class="form-range" id="elevenPromptInfluence" type="range" min="0" max="1" step="0.01" value="0.3" />
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <div class="form-check form-switch mt-md-4 pt-md-2">
+                        <input class="form-check-input" type="checkbox" role="switch" id="elevenLoop" />
+                        <label class="form-check-label" for="elevenLoop">循环音效</label>
+                      </div>
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label">每次结果</label>
+                      <div class="eleven-fixed-value"><strong class="me-2">4 条</strong><span class="small text-muted">与 ElevenLabs 网页一致</span></div>
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label" for="elevenSfxModel">模型</label>
+                      <select class="form-select mono" id="elevenSfxModel">
+                        <option value="eleven_text_to_sound_v2">eleven_text_to_sound_v2</option>
+                        <option value="eleven_text_to_sound_v3">eleven_text_to_sound_v3</option>
+                      </select>
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label" for="elevenSfxOutputFormat">输出格式</label>
+                      <select class="form-select mono" id="elevenSfxOutputFormat">
+                        <option value="opus_48000_128">opus_48000_128</option>
+                        <option value="mp3_44100_128">mp3_44100_128</option>
+                        <option value="mp3_44100_192">mp3_44100_192</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="elevenTtsFields" style="display: none;">
+                  <div class="row g-3">
+                    <div class="col-12">
+                      <label class="form-label" for="elevenVoiceId">音色 ID（可选）</label>
+                      <input class="form-control mono" id="elevenVoiceId" placeholder="留空时使用账号可用音色列表中的第一个" />
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label" for="elevenTtsModel">模型</label>
+                      <select class="form-select mono" id="elevenTtsModel">
+                        <option value="eleven_multilingual_v2">eleven_multilingual_v2</option>
+                        <option value="eleven_turbo_v2_5">eleven_turbo_v2_5</option>
+                        <option value="eleven_flash_v2_5">eleven_flash_v2_5</option>
+                      </select>
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label" for="elevenTtsOutputFormat">输出格式</label>
+                      <select class="form-select mono" id="elevenTtsOutputFormat">
+                        <option value="mp3_44100_128">mp3_44100_128</option>
+                        <option value="mp3_44100_192">mp3_44100_192</option>
+                        <option value="opus_48000_128">opus_48000_128</option>
+                      </select>
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label" for="elevenLanguageCode">语言代码（可选）</label>
+                      <input class="form-control mono" id="elevenLanguageCode" placeholder="如 zh、en、ru" />
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label" for="elevenTtsSpeed">语速（可选）</label>
+                      <input class="form-control" id="elevenTtsSpeed" type="number" min="0.7" max="1.2" step="0.05" placeholder="平台默认" />
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label" for="elevenTtsStability">稳定度（可选）</label>
+                      <input class="form-control" id="elevenTtsStability" type="number" min="0" max="1" step="0.05" placeholder="平台默认" />
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label" for="elevenTtsSimilarity">相似度（可选）</label>
+                      <input class="form-control" id="elevenTtsSimilarity" type="number" min="0" max="1" step="0.05" placeholder="平台默认" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="mb-3" id="fishAudioWrap" style="display: none;">
+                <hr class="my-3" />
+                <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+                  <h6 class="mb-0">Fish Audio 音色</h6>
+                  <span class="badge text-bg-light border" id="fishVoiceCount">0 个音色</span>
+                  <span class="text-muted small ms-auto" id="fishVoiceStatus"></span>
+                </div>
+                <div class="row g-2">
+                  <div class="col-12 col-md-4">
+                    <label class="form-label">音色来源</label>
+                    <select class="form-select" id="fishVoiceSource">
+                      <option value="curated">推荐音色</option>
+                      <option value="public">Fish 公开音色</option>
+                    </select>
+                  </div>
+                  <div class="col-12 col-md-4">
+                    <label class="form-label">语言/口音</label>
+                    <select class="form-select" id="fishVoiceLanguage">
+                      <option value="">全部语言</option>
+                      <option value="zh">中文</option>
+                      <option value="en">英语</option>
+                      <option value="ja">日语</option>
+                      <option value="ko">韩语</option>
+                      <option value="es">西班牙语</option>
+                      <option value="fr">法语</option>
+                      <option value="de">德语</option>
+                      <option value="ru">俄语</option>
+                      <option value="ar">阿拉伯语</option>
+                    </select>
+                  </div>
+                  <div class="col-6 col-md-2">
+                    <label class="form-label">性别</label>
+                    <select class="form-select" id="fishVoiceGender">
+                      <option value="">全部</option>
+                      <option value="female">女</option>
+                      <option value="male">男</option>
+                    </select>
+                  </div>
+                  <div class="col-6 col-md-2">
+                    <label class="form-label">年龄段</label>
+                    <select class="form-select" id="fishVoiceAge">
+                      <option value="">全部</option>
+                      <option value="young">青年</option>
+                      <option value="middle-aged">中年</option>
+                      <option value="old">年长</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="mt-2">
+                  <label class="form-label">搜索</label>
+                  <input class="form-control" id="fishVoiceQuery" placeholder="名称、特点或音色 ID" />
+                </div>
+                <div class="mt-2">
+                  <label class="form-label">选择音色</label>
+                  <select class="form-select" id="fishVoiceSelect" size="6"></select>
+                  <div class="fish-voice-meta text-muted small mt-2" id="fishVoiceMeta">请选择音色</div>
+                  <audio id="fishVoicePreview" controls preload="none" style="display: none;"></audio>
+                </div>
+                <div class="mt-2">
+                  <label class="form-label">自定义音色 ID（可选）</label>
+                  <input class="form-control mono" id="fishCustomVoiceId" placeholder="填写后优先于上方选择" />
+                </div>
+                <details class="mt-3">
+                  <summary class="small text-primary">高级参数</summary>
+                  <div class="row g-2 mt-1">
+                    <div class="col-12 col-md-4">
+                      <label class="form-label">backend</label>
+                      <input class="form-control mono" id="fishBackend" value="s2.1-pro" />
+                    </div>
+                    <div class="col-6 col-md-4">
+                      <label class="form-label">format</label>
+                      <select class="form-select" id="fishFormat">
+                        <option value="mp3">MP3</option>
+                        <option value="wav">WAV</option>
+                        <option value="pcm">PCM</option>
+                        <option value="opus">OPUS</option>
+                      </select>
+                    </div>
+                    <div class="col-6 col-md-4">
+                      <label class="form-label">speed</label>
+                      <input class="form-control" id="fishSpeed" type="number" value="1" step="0.05" />
+                    </div>
+                    <div class="col-6 col-md-4">
+                      <label class="form-label">volume</label>
+                      <input class="form-control" id="fishVolume" type="number" value="0" step="1" />
+                    </div>
+                    <div class="col-6 col-md-4">
+                      <label class="form-label">temperature</label>
+                      <input class="form-control" id="fishTemperature" type="number" value="0.7" step="0.05" />
+                    </div>
+                    <div class="col-6 col-md-4">
+                      <label class="form-label">top_p</label>
+                      <input class="form-control" id="fishTopP" type="number" value="0.9" step="0.05" />
+                    </div>
+                    <div class="col-12 col-md-8 d-flex align-items-end">
+                      <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="fishNormalizeLoudness" checked />
+                        <label class="form-check-label" for="fishNormalizeLoudness">响度标准化</label>
+                      </div>
+                    </div>
+                  </div>
+                </details>
+              </div>
+              <div class="mb-3" id="videoUrlWrap">
                 <label class="form-label">角色视频链接 video_url（可选，用于创建角色）</label>
                 <input class="form-control mono" id="videoUrl" placeholder="https://... (mp4)" />
                 <div class="text-muted small">当填写 video_url 时，后端将优先走“创建角色”流程（prompt 可留空）。限制：视频 ≤5 秒、≤10MB。</div>
               </div>
-              <div class="mb-3">
+              <div class="mb-3" id="firstImageUrlWrap">
                 <label class="form-label">首帧图片链接 first_image_url（可选）</label>
                 <input class="form-control mono" id="firstImageUrl" placeholder="https://..." />
                 <div class="text-muted small">后端不再接收图片二进制，只接收网络链接（由 handler 自行处理）。</div>
@@ -247,7 +458,7 @@
                 </datalist>
                 <div class="text-muted small">留空时按上面的比例和分辨率换算；填写时会直接透传官方 <span class="mono">size</span>。</div>
               </div>
-              <div class="mb-3 form-check">
+              <div class="mb-3 form-check" id="dreaminaImageUploadWorkflowWrap">
                 <input class="form-check-input" type="checkbox" id="dreaminaImageUploadWorkflow" />
                 <label class="form-check-label" for="dreaminaImageUploadWorkflow">Dreamina 单图上传保存（workflow_kind=image_upload）</label>
                 <div class="text-muted small">勾选后会把上面的图片链接作为 <span class="mono">image_url</span>，并在 payload 中加入 <span class="mono">workflow_kind: "image_upload"</span>。</div>
@@ -265,7 +476,7 @@
                   <option value="4k">4K</option>
                 </select>
               </div>
-              <div class="mb-3 form-check">
+              <div class="mb-3 form-check" id="headlessModeWrap">
                 <input class="form-check-input" type="checkbox" id="headlessMode" />
                 <label class="form-check-label" for="headlessMode">无头模式打开窗口</label>
                 <div class="text-muted small">勾选后将以无头模式（headless）打开指纹浏览器窗口，不显示界面。</div>
@@ -299,7 +510,10 @@
               <div class="mb-3">
                 <div class="text-muted small">结果</div>
                 <div id="resultPreview" class="result-preview-grid mb-2"></div>
-                <pre class="bg-light border rounded p-2 small" id="result" style="min-height: 160px; white-space: pre-wrap;"></pre>
+                <details id="resultRawDetails">
+                  <summary class="text-primary small mb-2">原始响应</summary>
+                  <pre class="bg-light border rounded p-2 small" id="result" style="min-height: 160px; white-space: pre-wrap;"></pre>
+                </details>
               </div>
             </div>
           </div>
@@ -348,10 +562,39 @@
         testImageResolution: `${LS_PREFIX}test.image_resolution`,
         testImageAspectRatio: `${LS_PREFIX}test.image_aspect_ratio`,
         testImageSize: `${LS_PREFIX}test.image_size`,
+        testFishVoiceSource: `${LS_PREFIX}test.fish.voice_source`,
+        testFishVoiceId: `${LS_PREFIX}test.fish.voice_id`,
+        testFishCustomVoiceId: `${LS_PREFIX}test.fish.custom_voice_id`,
+        testFishLanguage: `${LS_PREFIX}test.fish.language`,
+        testFishGender: `${LS_PREFIX}test.fish.gender`,
+        testFishAge: `${LS_PREFIX}test.fish.age`,
+        testFishBackend: `${LS_PREFIX}test.fish.backend`,
+        testFishFormat: `${LS_PREFIX}test.fish.format`,
+        testFishSpeed: `${LS_PREFIX}test.fish.speed`,
+        testFishVolume: `${LS_PREFIX}test.fish.volume`,
+        testFishTemperature: `${LS_PREFIX}test.fish.temperature`,
+        testFishTopP: `${LS_PREFIX}test.fish.top_p`,
+        testFishNormalizeLoudness: `${LS_PREFIX}test.fish.normalize_loudness`,
+        testElevenMode: `${LS_PREFIX}test.elevenlabs.mode`,
+        testElevenDurationSeconds: `${LS_PREFIX}test.elevenlabs.duration_seconds`,
+        testElevenPromptInfluence: `${LS_PREFIX}test.elevenlabs.prompt_influence`,
+        testElevenLoop: `${LS_PREFIX}test.elevenlabs.loop`,
+        testElevenSfxModel: `${LS_PREFIX}test.elevenlabs.sfx_model`,
+        testElevenSfxOutputFormat: `${LS_PREFIX}test.elevenlabs.sfx_output_format`,
+        testElevenVoiceId: `${LS_PREFIX}test.elevenlabs.voice_id`,
+        testElevenTtsModel: `${LS_PREFIX}test.elevenlabs.tts_model`,
+        testElevenTtsOutputFormat: `${LS_PREFIX}test.elevenlabs.tts_output_format`,
+        testElevenLanguageCode: `${LS_PREFIX}test.elevenlabs.language_code`,
+        testElevenTtsSpeed: `${LS_PREFIX}test.elevenlabs.tts_speed`,
+        testElevenTtsStability: `${LS_PREFIX}test.elevenlabs.tts_stability`,
+        testElevenTtsSimilarity: `${LS_PREFIX}test.elevenlabs.tts_similarity`,
         testLastTaskId: `${LS_PREFIX}test.last_task_id`,
       };
       function mappingLsKey(taskTypeCode) {
         return `${LS_PREFIX}test.mapping_id.${taskTypeCode || ""}`;
+      }
+      function lastTaskLsKey(taskTypeCode) {
+        return `${LS_PREFIX}test.last_task_id.${taskTypeCode || ""}`;
       }
       function lsGet(key) {
         try { return localStorage.getItem(key); } catch { return null; }
@@ -369,6 +612,9 @@
 
       let taskTypeByCode = new Map(); // code -> {id, code, name, ...}
       let cardKeys = []; // [{id, card_key, sort_order, ...}]
+      let fishVoices = [];
+      let fishVoiceLoadSeq = 0;
+      let fishVoiceQueryTimer = null;
 
       const LEONARDO_TEST_DEFAULTS = {
         model: "seedance-2.0-fast",
@@ -403,6 +649,127 @@
       function isDreaminaType(typeCode) {
         const t = taskTypeByCode.get(typeCode);
         return typeCode === "dreamina_workflow" || String(t?.create_task_handler || "").trim() === "dreamina_workflow";
+      }
+
+      function isFishAudioType(typeCode) {
+        const t = taskTypeByCode.get(typeCode);
+        return typeCode === "fish_audio_workflow" || String(t?.create_task_handler || "").trim() === "fish_audio_workflow";
+      }
+
+      function isElevenLabsType(typeCode) {
+        const t = taskTypeByCode.get(typeCode);
+        return typeCode === "elevenlabs_workflow" || String(t?.create_task_handler || "").trim() === "elevenlabs_workflow";
+      }
+
+      function selectedElevenMode() {
+        return document.querySelector('input[name="elevenMode"]:checked')?.value === "tts" ? "tts" : "sound_effects";
+      }
+
+      function updateElevenLabsModeUi() {
+        const mode = selectedElevenMode();
+        const soundFields = document.getElementById("elevenSoundEffectsFields");
+        const ttsFields = document.getElementById("elevenTtsFields");
+        if (soundFields) soundFields.style.display = mode === "sound_effects" ? "" : "none";
+        if (ttsFields) ttsFields.style.display = mode === "tts" ? "" : "none";
+      }
+
+      function selectedFishVoice() {
+        const selectedId = String(document.getElementById("fishVoiceSelect")?.value || "").trim();
+        return fishVoices.find(item => String(item.voice_id || "") === selectedId) || null;
+      }
+
+      function renderFishVoiceDetails() {
+        const voice = selectedFishVoice();
+        const meta = document.getElementById("fishVoiceMeta");
+        const audio = document.getElementById("fishVoicePreview");
+        if (!voice) {
+          if (meta) meta.textContent = fishVoices.length ? "请选择音色" : "当前筛选条件下没有音色";
+          if (audio) {
+            audio.pause();
+            audio.removeAttribute("src");
+            audio.style.display = "none";
+            audio.load();
+          }
+          return;
+        }
+        const languages = Array.isArray(voice.languages) ? voice.languages.join(" / ") : "";
+        const traits = Array.isArray(voice.voice_traits) ? voice.voice_traits.join(" / ") : "";
+        if (meta) {
+          meta.textContent = [voice.name, voice.gender, voice.age_group, languages, traits, voice.voice_id]
+            .filter(Boolean)
+            .join(" · ");
+        }
+        if (audio) {
+          const previewUrl = String(voice.preview_url || "").trim();
+          audio.pause();
+          if (previewUrl) {
+            audio.src = previewUrl;
+            audio.style.display = "";
+          } else {
+            audio.removeAttribute("src");
+            audio.style.display = "none";
+          }
+          audio.load();
+        }
+      }
+
+      function renderFishVoiceOptions(items) {
+        fishVoices = Array.isArray(items) ? items : [];
+        const select = document.getElementById("fishVoiceSelect");
+        const count = document.getElementById("fishVoiceCount");
+        if (!select) return;
+        const savedVoiceId = String(lsGet(LS_KEYS.testFishVoiceId) || "").trim();
+        select.replaceChildren();
+        for (const voice of fishVoices) {
+          const option = document.createElement("option");
+          option.value = String(voice.voice_id || "");
+          const languages = Array.isArray(voice.languages) ? voice.languages.join("/") : "";
+          const traits = Array.isArray(voice.voice_traits) ? voice.voice_traits.slice(0, 4).join("/") : "";
+          option.textContent = [voice.name, voice.gender, voice.age_group, languages, traits].filter(Boolean).join(" · ");
+          select.appendChild(option);
+        }
+        if (savedVoiceId && fishVoices.some(item => String(item.voice_id || "") === savedVoiceId)) {
+          select.value = savedVoiceId;
+        } else if (fishVoices.length) {
+          select.value = String(fishVoices[0].voice_id || "");
+          lsSet(LS_KEYS.testFishVoiceId, select.value);
+        }
+        if (count) count.textContent = `${fishVoices.length} 个音色`;
+        renderFishVoiceDetails();
+      }
+
+      async function loadFishVoices() {
+        const seq = ++fishVoiceLoadSeq;
+        const source = String(document.getElementById("fishVoiceSource")?.value || "curated");
+        const language = String(document.getElementById("fishVoiceLanguage")?.value || "");
+        const gender = String(document.getElementById("fishVoiceGender")?.value || "");
+        const ageGroup = String(document.getElementById("fishVoiceAge")?.value || "");
+        const query = String(document.getElementById("fishVoiceQuery")?.value || "").trim();
+        const status = document.getElementById("fishVoiceStatus");
+        const params = new URLSearchParams({source, page_size: "100"});
+        if (language) params.set("language", language);
+        if (gender) params.set("gender", gender);
+        if (ageGroup) params.set("age_group", ageGroup);
+        if (query) params.set("q", query);
+        if (status) status.textContent = "加载中...";
+        try {
+          const response = await adminFetch(`/api/admin/fish-audio/voices?${params.toString()}`);
+          if (!response) return;
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.detail || "加载音色失败");
+          if (seq !== fishVoiceLoadSeq) return;
+          renderFishVoiceOptions(data.items || []);
+          if (status) status.textContent = data.fallback ? "公开目录不可用，已使用推荐音色" : "";
+        } catch (error) {
+          if (seq !== fishVoiceLoadSeq) return;
+          renderFishVoiceOptions([]);
+          if (status) status.textContent = error.message || "加载音色失败";
+        }
+      }
+
+      function scheduleFishVoiceLoad() {
+        if (fishVoiceQueryTimer) clearTimeout(fishVoiceQueryTimer);
+        fishVoiceQueryTimer = setTimeout(() => loadFishVoices(), 250);
       }
 
       function setSelectValueIfEmpty(id, value) {
@@ -541,13 +908,18 @@
           .concat(result.proxy_urls || [])
           .concat(d?.proxy_image_url || [])
           .concat(result.proxy_image_url || [])
+          .concat(d?.result_urls || [])
+          .concat(d?.public_urls || [])
           .concat(result.urls || [])
+          .concat(result.public_urls || [])
           .concat(meta.result_urls || [])
           .concat(d?.url || [])
           .concat(d?.image_url || [])
           .concat(d?.video_url || [])
+          .concat(d?.audio_url || [])
           .concat(result.image_url || [])
           .concat(result.video_url || [])
+          .concat(result.audio_url || [])
           .concat(result.share_url || [])
           .map(x => String(x || "").trim())
           .filter(Boolean);
@@ -560,18 +932,51 @@
         const resultKind = String(result.workflow_kind || result.type || d?.workflow_kind || "").toLowerCase();
         const isVideoUrl = (u) => /^data:video\//i.test(u) || /\.(mp4|mov|webm)(\?|$)/i.test(u) || /(?:video|motion)/i.test(u);
         const isImageUrl = (u) => /^data:image\//i.test(u) || /\/v1\/tasks\/[^/]+\/assets\/\d+(\?|$)/i.test(u) || /\.(png|jpe?g|webp|gif)(\?|$)/i.test(u) || /files\.oaiusercontent\.com/i.test(u);
+        const isAudioUrl = (u) => /^data:audio\//i.test(u) || /\.(mp3|wav|pcm|opus|ogg|m4a|aac)(\?|$)/i.test(u);
+        const directAudioUrls = []
+          .concat(d?.audio_url || [])
+          .concat(d?.result_urls || [])
+          .concat(d?.public_urls || [])
+          .concat(result.audio_url || [])
+          .concat(result.public_urls || [])
+          .concat(resultKind.includes("audio") ? (result.share_url || []) : [])
+          .concat(resultKind.includes("audio") ? (result.urls || []) : [])
+          .map(x => String(x || "").trim())
+          .filter(Boolean);
         const directVideoUrls = []
           .concat(d?.video_url || [])
           .concat(result.video_url || [])
-          .concat(result.share_url || [])
+          .concat(resultKind.includes("audio") ? [] : (result.share_url || []))
           .concat(resultKind.includes("video") ? (result.urls || []) : [])
           .map(x => String(x || "").trim())
           .filter(Boolean);
         const urls = collectTaskUrls(d);
+        const audioCandidates = Array.from(new Set(directAudioUrls.concat(urls)));
+        const audioUrls = audioCandidates.filter(isAudioUrl);
+        if (!audioUrls.length && resultKind.includes("audio") && directAudioUrls[0]) audioUrls.push(directAudioUrls[0]);
         const videoCandidates = Array.from(new Set(directVideoUrls.concat(urls)));
         const videoUrl = videoCandidates.find(isVideoUrl) || directVideoUrls.find(u => !isImageUrl(u));
         const imageUrl = urls.find(u => isImageUrl(u) || (!videoUrl && /\.blob\.core\.windows\.net/i.test(u)));
-        if (videoUrl) {
+        if (audioUrls.length) {
+          const provider = String(result.provider || "").trim().toLowerCase();
+          const providerName = provider === "elevenlabs" ? "ElevenLabs" : (provider === "fish_audio" ? "Fish Audio" : "");
+          const rows = audioUrls.map((audioUrl, index) => `
+            <div class="audio-result-row">
+              <strong>#${index + 1}</strong>
+              <audio src="${escapeHtml(audioUrl)}" controls preload="metadata"></audio>
+              <a class="btn btn-sm btn-outline-secondary audio-result-action" href="${escapeHtml(audioUrl)}" target="_blank" rel="noopener noreferrer" download>下载</a>
+            </div>
+          `).join("");
+          preview.innerHTML = `
+            <div class="audio-results">
+              <div class="audio-results-header">
+                <strong>${providerName ? `${escapeHtml(providerName)} ` : ""}音频结果</strong>
+                <span class="small text-muted">${audioUrls.length} 条</span>
+              </div>
+              ${rows}
+            </div>
+          `;
+        } else if (videoUrl) {
           preview.innerHTML = `<video src="${escapeHtml(videoUrl)}" controls playsinline></video>`;
         } else if (imageUrl) {
           preview.innerHTML = `<a href="${escapeHtml(imageUrl)}" target="_blank" rel="noopener noreferrer"><img src="${escapeHtml(imageUrl)}" alt="generated image" /></a>`;
@@ -584,24 +989,41 @@
         const type = document.getElementById("taskType")?.value || "";
         const isLeonardo = isLeonardoType(type);
         const isDreamina = isDreaminaType(type);
+        const isFishAudio = isFishAudioType(type);
+        const isElevenLabs = isElevenLabsType(type);
+        const isAudioWorkflow = isFishAudio || isElevenLabs;
         const videoModelWrap = document.getElementById("videoModelWrap");
         if (videoModelWrap) videoModelWrap.style.display = type === "veo_workflow" ? "" : "none";
         const leonardoModelWrap = document.getElementById("leonardoModelWrap");
         if (leonardoModelWrap) leonardoModelWrap.style.display = isLeonardo ? "" : "none";
         const dreaminaModelWrap = document.getElementById("dreaminaModelWrap");
         if (dreaminaModelWrap) dreaminaModelWrap.style.display = isDreamina ? "" : "none";
+        const fishAudioWrap = document.getElementById("fishAudioWrap");
+        if (fishAudioWrap) fishAudioWrap.style.display = isFishAudio ? "" : "none";
+        const elevenLabsWrap = document.getElementById("elevenLabsWrap");
+        if (elevenLabsWrap) elevenLabsWrap.style.display = isElevenLabs ? "" : "none";
+        for (const id of ["cardKeyWrap", "videoUrlWrap", "firstImageUrlWrap", "dreaminaImageUploadWorkflowWrap"]) {
+          const el = document.getElementById(id);
+          if (el) el.style.display = isAudioWorkflow ? "none" : "";
+        }
         const imageAspectRatioWrap = document.getElementById("imageAspectRatioWrap");
-        if (imageAspectRatioWrap) imageAspectRatioWrap.style.display = isDreamina ? "none" : "";
+        if (imageAspectRatioWrap) imageAspectRatioWrap.style.display = (isDreamina || isAudioWorkflow) ? "none" : "";
         const imageSizeWrap = document.getElementById("imageSizeWrap");
-        if (imageSizeWrap) imageSizeWrap.style.display = isDreamina ? "none" : "";
+        if (imageSizeWrap) imageSizeWrap.style.display = (isDreamina || isAudioWorkflow) ? "none" : "";
         const imageResolutionWrap = document.getElementById("imageResolutionWrap");
-        if (imageResolutionWrap) imageResolutionWrap.style.display = isDreamina ? "none" : "";
+        if (imageResolutionWrap) imageResolutionWrap.style.display = (isDreamina || isAudioWorkflow) ? "none" : "";
         const durationWrap = document.getElementById("durationWrap");
-        if (durationWrap) durationWrap.style.display = isDreamina ? "none" : "";
+        if (durationWrap) durationWrap.style.display = (isDreamina || isAudioWorkflow) ? "none" : "";
+        const promptLabel = document.getElementById("promptLabel");
+        const elevenMode = selectedElevenMode();
+        if (promptLabel) promptLabel.textContent = isFishAudio || (isElevenLabs && elevenMode === "tts") ? "朗读文本" : (isElevenLabs ? "音效描述" : "文本内容");
+        const promptEl = document.getElementById("prompt");
+        if (promptEl) promptEl.placeholder = isFishAudio || (isElevenLabs && elevenMode === "tts") ? "输入需要合成语音的文本" : (isElevenLabs ? "描述要生成的声音" : "输入文本提示词");
         const durationEl = document.getElementById("duration");
         if (durationEl) durationEl.placeholder = isGptType(type) ? "GPT image2 auto uses 1" : (isLeonardo ? "8" : (isDreamina ? "4-15" : "5"));
         if (isLeonardo) applyLeonardoDefaultsIfEmpty();
         if (isDreamina) applyDreaminaDefaultsIfEmpty();
+        if (isElevenLabs) updateElevenLabsModeUi();
         updateLeonardoSizeOptions();
       }
 
@@ -619,7 +1041,14 @@
         const items = (d.task_types || []).filter(t => !t.deleted && t.enabled);
         taskTypeByCode = new Map(items.map(t => [t.code, t]));
         const sel = document.getElementById("taskType");
-        sel.innerHTML = items.map(t => `<option value="${escapeHtml(t.code)}">${escapeHtml(t.name)} (${escapeHtml(t.code)})</option>`).join("");
+        sel.innerHTML = items.map(t => {
+          let name = t.name;
+          if (/\?/.test(String(name || ""))) {
+            if (t.code === "fish_audio_workflow") name = "Fish Audio 音频生成";
+            if (t.code === "elevenlabs_workflow") name = "ElevenLabs 音效 / TTS";
+          }
+          return `<option value="${escapeHtml(t.code)}">${escapeHtml(name)} (${escapeHtml(t.code)})</option>`;
+        }).join("");
 
         // 任务类型回填（需等 options 渲染完成）
         const saved = lsGet(LS_KEYS.testTaskType);
@@ -740,6 +1169,9 @@
         try {
           if (!apiKey) throw new Error("API Key 未加载");
           const type = document.getElementById("taskType").value;
+          const fishAudio = isFishAudioType(type);
+          const elevenLabs = isElevenLabsType(type);
+          const audioWorkflow = fishAudio || elevenLabs;
           const mappingIdRaw = (document.getElementById("taskWindow")?.value || "").trim();
           const prompt = document.getElementById("prompt").value.trim();
           const videoUrl = document.getElementById("videoUrl").value.trim();
@@ -750,24 +1182,95 @@
           const durationRaw = document.getElementById("duration").value.trim();
           const duration = durationRaw ? Number(durationRaw) : undefined;
           if (!type) throw new Error("请选择任务类型");
-          if (!prompt && !videoUrl && !(dreaminaImageUploadWorkflow && firstImageUrl)) throw new Error("请输入文本内容、填写 video_url，或勾选单图上传并填写图片链接");
+          if (fishAudio && !prompt) throw new Error("请输入朗读文本");
+          if (elevenLabs && !prompt) throw new Error(selectedElevenMode() === "tts" ? "请输入朗读文本" : "请输入音效描述");
+          if (!audioWorkflow && !prompt && !videoUrl && !(dreaminaImageUploadWorkflow && firstImageUrl)) throw new Error("请输入文本内容、填写 video_url，或勾选单图上传并填写图片链接");
           // 注意：不同 task handler 可能需要不同字段，这里仅示例常用字段
-          const payload = { prompt };
+          const payload = audioWorkflow ? { text: prompt } : { prompt };
+          if (fishAudio) {
+            const customVoiceId = String(document.getElementById("fishCustomVoiceId")?.value || "").trim();
+            const selectedVoiceId = String(document.getElementById("fishVoiceSelect")?.value || "").trim();
+            const referenceId = customVoiceId || selectedVoiceId;
+            if (!referenceId) throw new Error("请选择音色或填写自定义音色 ID");
+            payload.reference_id = referenceId;
+            payload.backend = String(document.getElementById("fishBackend")?.value || "s2.1-pro").trim() || "s2.1-pro";
+            payload.format = String(document.getElementById("fishFormat")?.value || "mp3").trim() || "mp3";
+            const numericFields = [
+              ["fishSpeed", "speed"],
+              ["fishVolume", "volume"],
+              ["fishTemperature", "temperature"],
+              ["fishTopP", "top_p"],
+            ];
+            for (const [elementId, fieldName] of numericFields) {
+              const raw = String(document.getElementById(elementId)?.value || "").trim();
+              if (!raw) continue;
+              const value = Number(raw);
+              if (!Number.isFinite(value)) throw new Error(`${fieldName} 必须是数字`);
+              payload[fieldName] = value;
+            }
+            payload.normalize_loudness = document.getElementById("fishNormalizeLoudness")?.checked === true;
+          }
+          if (elevenLabs) {
+            const mode = selectedElevenMode();
+            payload.mode = mode;
+            if (mode === "sound_effects") {
+              payload.prompt = prompt;
+              delete payload.text;
+              const durationSecondsRaw = String(document.getElementById("elevenDurationSeconds")?.value || "").trim();
+              if (durationSecondsRaw) {
+                const durationSeconds = Number(durationSecondsRaw);
+                if (!Number.isFinite(durationSeconds) || durationSeconds < 0.5 || durationSeconds > 30) {
+                  throw new Error("ElevenLabs 音效时长必须在 0.5 到 30 秒之间");
+                }
+                payload.duration_seconds = durationSeconds;
+              }
+              const promptInfluence = Number(document.getElementById("elevenPromptInfluence")?.value || "0.3");
+              if (!Number.isFinite(promptInfluence) || promptInfluence < 0 || promptInfluence > 1) {
+                throw new Error("ElevenLabs 提示词权重必须在 0 到 1 之间");
+              }
+              payload.prompt_influence = promptInfluence;
+              payload.loop = document.getElementById("elevenLoop")?.checked === true;
+              payload.model_id = String(document.getElementById("elevenSfxModel")?.value || "eleven_text_to_sound_v2");
+              payload.output_format = String(document.getElementById("elevenSfxOutputFormat")?.value || "opus_48000_128");
+              payload.number_of_generations = 4;
+            } else {
+              const voiceId = String(document.getElementById("elevenVoiceId")?.value || "").trim();
+              const languageCode = String(document.getElementById("elevenLanguageCode")?.value || "").trim();
+              if (voiceId) payload.voice_id = voiceId;
+              if (languageCode) payload.language_code = languageCode;
+              payload.model_id = String(document.getElementById("elevenTtsModel")?.value || "eleven_multilingual_v2");
+              payload.output_format = String(document.getElementById("elevenTtsOutputFormat")?.value || "mp3_44100_128");
+              const optionalTtsNumbers = [
+                ["elevenTtsSpeed", "speed", 0.7, 1.2],
+                ["elevenTtsStability", "stability", 0, 1],
+                ["elevenTtsSimilarity", "similarity_boost", 0, 1],
+              ];
+              for (const [elementId, fieldName, min, max] of optionalTtsNumbers) {
+                const raw = String(document.getElementById(elementId)?.value || "").trim();
+                if (!raw) continue;
+                const value = Number(raw);
+                if (!Number.isFinite(value) || value < min || value > max) {
+                  throw new Error(`${fieldName} 必须在 ${min} 到 ${max} 之间`);
+                }
+                payload[fieldName] = value;
+              }
+            }
+          }
           if (type === "veo_workflow" && videoModel) payload.model = videoModel;
-          if (videoUrl) payload.video_url = videoUrl;
-          if (dreaminaImageUploadWorkflow) {
+          if (!audioWorkflow && videoUrl) payload.video_url = videoUrl;
+          if (!audioWorkflow && dreaminaImageUploadWorkflow) {
             if (!firstImageUrl) throw new Error("Dreamina 单图上传保存需要填写图片链接");
             payload.workflow_kind = "image_upload";
             payload.image_url = firstImageUrl;
-          } else if (firstImageUrl) {
+          } else if (!audioWorkflow && firstImageUrl) {
             payload.first_image_url = firstImageUrl;
           }
-          if (cardKeyIdRaw) {
+          if (!audioWorkflow && cardKeyIdRaw) {
             const selected = cardKeys.find(x => String(x.id) === String(cardKeyIdRaw));
             if (!selected || !selected.card_key) throw new Error("所选卡密不存在，请刷新后重试");
             payload.card_key = String(selected.card_key);
           }
-          if (duration !== undefined && !Number.isNaN(duration)) payload.duration = duration;
+          if (!audioWorkflow && duration !== undefined && !Number.isNaN(duration)) payload.duration = duration;
           const imageResRaw = (document.getElementById("imageResolution")?.value || "").trim().toLowerCase();
           const imageResolution = (imageResRaw === "2k" || imageResRaw === "4k") ? imageResRaw : "1k";
           const imageAspectRatioRaw = (document.getElementById("imageAspectRatio")?.value || "").trim();
@@ -887,6 +1390,7 @@
           renderResultPreview(null);
           setProgress(0);
           lsSet(LS_KEYS.testLastTaskId, d.task_id);
+          lsSet(lastTaskLsKey(type), d.task_id);
           autoPollEnabled = true;
           startPoll(d.task_id);
         } catch (e) {
@@ -935,6 +1439,20 @@
       }
 
       document.getElementById("btnQuery").addEventListener("click", queryOnce);
+
+      async function restoreLastTaskForType(taskTypeCode) {
+        stopPoll();
+        const taskId = (lsGet(lastTaskLsKey(taskTypeCode)) || "").trim();
+        if (!taskId) {
+          renderTaskSnapshot("", null);
+          return null;
+        }
+        const d = await fetchAndRenderTask(taskId, { silent: true });
+        if (autoPollEnabled && d && d.status !== "completed" && d.status !== "failed") {
+          startPoll(taskId);
+        }
+        return d;
+      }
 
       async function init() {
         // 文本内容回填（无需等待接口）
@@ -1085,6 +1603,77 @@
           imageSizeEl.addEventListener("input", (e) => lsSet(LS_KEYS.testImageSize, (e.target.value || "").trim()));
         }
 
+        const fishVoiceSourceEl = bindValueCache("fishVoiceSource", LS_KEYS.testFishVoiceSource, "change");
+        const fishVoiceLanguageEl = bindValueCache("fishVoiceLanguage", LS_KEYS.testFishLanguage, "change");
+        const fishVoiceGenderEl = bindValueCache("fishVoiceGender", LS_KEYS.testFishGender, "change");
+        const fishVoiceAgeEl = bindValueCache("fishVoiceAge", LS_KEYS.testFishAge, "change");
+        bindValueCache("fishCustomVoiceId", LS_KEYS.testFishCustomVoiceId);
+        bindValueCache("fishBackend", LS_KEYS.testFishBackend);
+        bindValueCache("fishFormat", LS_KEYS.testFishFormat, "change");
+        bindValueCache("fishSpeed", LS_KEYS.testFishSpeed);
+        bindValueCache("fishVolume", LS_KEYS.testFishVolume);
+        bindValueCache("fishTemperature", LS_KEYS.testFishTemperature);
+        bindValueCache("fishTopP", LS_KEYS.testFishTopP);
+        for (const el of [fishVoiceSourceEl, fishVoiceLanguageEl, fishVoiceGenderEl, fishVoiceAgeEl]) {
+          if (el) el.addEventListener("change", () => loadFishVoices());
+        }
+        const fishVoiceQueryEl = document.getElementById("fishVoiceQuery");
+        if (fishVoiceQueryEl) fishVoiceQueryEl.addEventListener("input", scheduleFishVoiceLoad);
+        const fishVoiceSelectEl = document.getElementById("fishVoiceSelect");
+        if (fishVoiceSelectEl) {
+          fishVoiceSelectEl.addEventListener("change", () => {
+            lsSet(LS_KEYS.testFishVoiceId, fishVoiceSelectEl.value || "");
+            renderFishVoiceDetails();
+          });
+        }
+        const fishNormalizeLoudnessEl = document.getElementById("fishNormalizeLoudness");
+        if (fishNormalizeLoudnessEl) {
+          const saved = lsGet(LS_KEYS.testFishNormalizeLoudness);
+          fishNormalizeLoudnessEl.checked = saved === null ? true : saved === "1";
+          fishNormalizeLoudnessEl.addEventListener("change", (e) => {
+            lsSet(LS_KEYS.testFishNormalizeLoudness, e.target.checked ? "1" : "0");
+          });
+        }
+
+        const savedElevenMode = (lsGet(LS_KEYS.testElevenMode) || "sound_effects").trim();
+        const elevenModeId = savedElevenMode === "tts" ? "elevenModeTts" : "elevenModeSoundEffects";
+        const savedElevenModeEl = document.getElementById(elevenModeId);
+        if (savedElevenModeEl) savedElevenModeEl.checked = true;
+        for (const modeEl of document.querySelectorAll('input[name="elevenMode"]')) {
+          modeEl.addEventListener("change", (e) => {
+            if (!e.target.checked) return;
+            lsSet(LS_KEYS.testElevenMode, e.target.value || "sound_effects");
+            updateElevenLabsModeUi();
+            updateTypeHints();
+          });
+        }
+        bindValueCache("elevenDurationSeconds", LS_KEYS.testElevenDurationSeconds);
+        const elevenPromptInfluenceEl = bindValueCache("elevenPromptInfluence", LS_KEYS.testElevenPromptInfluence);
+        const syncElevenPromptInfluence = () => {
+          const value = Number(elevenPromptInfluenceEl?.value || 0.3);
+          const normalized = Number.isFinite(value) && value >= 0 && value <= 1 ? value : 0.3;
+          if (elevenPromptInfluenceEl) elevenPromptInfluenceEl.value = String(normalized);
+          const label = document.getElementById("elevenPromptInfluenceValue");
+          if (label) label.textContent = `${Math.round(normalized * 100)}%`;
+        };
+        if (elevenPromptInfluenceEl) elevenPromptInfluenceEl.addEventListener("input", syncElevenPromptInfluence);
+        syncElevenPromptInfluence();
+        const elevenLoopEl = document.getElementById("elevenLoop");
+        if (elevenLoopEl) {
+          elevenLoopEl.checked = (lsGet(LS_KEYS.testElevenLoop) || "") === "1";
+          elevenLoopEl.addEventListener("change", (e) => lsSet(LS_KEYS.testElevenLoop, e.target.checked ? "1" : "0"));
+        }
+        bindValueCache("elevenSfxModel", LS_KEYS.testElevenSfxModel, "change");
+        bindValueCache("elevenSfxOutputFormat", LS_KEYS.testElevenSfxOutputFormat, "change");
+        bindValueCache("elevenVoiceId", LS_KEYS.testElevenVoiceId);
+        bindValueCache("elevenTtsModel", LS_KEYS.testElevenTtsModel, "change");
+        bindValueCache("elevenTtsOutputFormat", LS_KEYS.testElevenTtsOutputFormat, "change");
+        bindValueCache("elevenLanguageCode", LS_KEYS.testElevenLanguageCode);
+        bindValueCache("elevenTtsSpeed", LS_KEYS.testElevenTtsSpeed);
+        bindValueCache("elevenTtsStability", LS_KEYS.testElevenTtsStability);
+        bindValueCache("elevenTtsSimilarity", LS_KEYS.testElevenTtsSimilarity);
+        updateElevenLabsModeUi();
+
         const typeEl = document.getElementById("taskType");
         typeEl.addEventListener("change", async (e) => {
           const v = e.target.value || "";
@@ -1092,6 +1681,8 @@
           updateTypeHints();
           // 切换任务类型后刷新窗口列表
           await loadTaskWindows(v);
+          if (isFishAudioType(v)) await loadFishVoices();
+          await restoreLastTaskForType(v);
         });
 
         // 窗口选择缓存（按 task_type_code 维度保存）
@@ -1120,21 +1711,16 @@
         await loadCardKeys();
         updateTypeHints();
         // 初始载入：根据当前任务类型拉取窗口列表
-        await loadTaskWindows((document.getElementById("taskType")?.value || "").trim());
+        const initialTaskType = (document.getElementById("taskType")?.value || "").trim();
+        await loadTaskWindows(initialTaskType);
+        if (isFishAudioType(initialTaskType)) await loadFishVoices();
 
-        // 恢复上次 task_id，并自动查询进度（切回页面也会刷新）
-        const lastTaskId = (lsGet(LS_KEYS.testLastTaskId) || "").trim();
-        if (lastTaskId) {
-          const input = document.getElementById("taskIdInput");
-          if (input) input.value = lastTaskId;
-          const d = await fetchAndRenderTask(lastTaskId, { silent: true });
-          if (d && d.status !== "completed" && d.status !== "failed") {
-            startPoll(lastTaskId);
-          }
-        }
+        // 每个任务类型独立恢复最近任务，避免左侧类型与右侧结果错位。
+        await restoreLastTaskForType(initialTaskType);
 
         async function refreshIfNeeded() {
-          const tid = (lsGet(LS_KEYS.testLastTaskId) || "").trim();
+          const currentType = (document.getElementById("taskType")?.value || "").trim();
+          const tid = getTaskIdFromInput() || (lsGet(lastTaskLsKey(currentType)) || "").trim();
           if (!tid) return;
           // 如果正在轮询就不额外触发；否则切回时查询一次并按需继续轮询
           const d = await fetchAndRenderTask(tid, { silent: true });

@@ -1,4 +1,9 @@
 import { ensureTab as ensureGenericTab, fetchJson, compactErrorResponse } from "./common.js";
+import {
+  extractVideoPollMediaName,
+  isUsableResolvedMediaUrl,
+  normalizeVideoStatusRequest
+} from "./veo_operations.mjs";
 
 const URLS = {
   credits: "https://aisandbox-pa.googleapis.com/v1/credits",
@@ -8,6 +13,7 @@ const URLS = {
   videoI2VStartEnd: "https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoStartAndEndImage",
   videoR2V: "https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoReferenceImages",
   videoPoll: "https://aisandbox-pa.googleapis.com/v1/video:batchCheckAsyncVideoGenerationStatus",
+  mediaUrlRedirect: "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect",
   upsampleImage: "https://aisandbox-pa.googleapis.com/v1/flow/upsampleImage",
   workflows: "https://aisandbox-pa.googleapis.com/v1/flowWorkflows"
 };
@@ -792,7 +798,7 @@ function parseImageResult(resp) {
   };
 }
 
-function parseVideoPoll(resp) {
+function parseVideoPoll(resp, fallbackMediaName = "") {
   let workflowId = "", projectId = "", status = "", videoUrl = "";
   const media = Array.isArray(resp?.media) ? resp.media : [];
   for (const item of media) {
@@ -802,8 +808,9 @@ function parseVideoPoll(resp) {
     videoUrl ||= item.mediaMetadata?.video?.fifeUrl || firstStringByKey(item, "fifeUrl");
   }
   videoUrl ||= firstStringByKey(resp, "fifeUrl");
+  const mediaName = extractVideoPollMediaName(resp, fallbackMediaName);
   const errorMessage = firstStringByKey(resp, "message") || firstStringByKey(resp, "errorMessage") || "";
-  return { workflowId, projectId, status, videoUrl, errorMessage };
+  return { workflowId, projectId, status, videoUrl, mediaName, errorMessage };
 }
 
 function isTerminalVideoFailureStatus(status) {
@@ -823,27 +830,36 @@ function isTerminalVideoDoneWithoutUrlStatus(status) {
   return s === "DONE" || s.includes("SUCCEEDED") || s.includes("SUCCESSFUL") || s.includes("COMPLETE");
 }
 
-function normalizeVideoOperations(mediaList) {
-  const out = [];
-  for (const item of Array.isArray(mediaList) ? mediaList : []) {
-    if (!item || typeof item !== "object") continue;
-    // batchCheckAsyncVideoGenerationStatus 的 operations[] 只接受 submit 返回的
-    // operation 包装对象；submit 返回的 media 项有时会额外带 name/projectId/
-    // workflowId/mediaMetadata/video 等字段，原样传会触发 "Unknown name ... at
-    // operations[0]"。因此这里按最小字段清洗。
-    if (item.operation && typeof item.operation === "object") {
-      out.push({ operation: item.operation });
-      continue;
+async function resolveFlowMediaUrl(mediaName) {
+  const name = String(mediaName || "").trim();
+  if (!name) throw new Error("VEO media URL resolution missing media id");
+  const endpoint = `${URLS.mediaUrlRedirect}?name=${encodeURIComponent(name)}&mediaUrlType=MEDIA_URL_TYPE_FULL_MEDIA`;
+  const timeoutMs = 30000;
+  let lastErr = null;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const resp = await fetchWithTimeout(endpoint, {
+        method: "GET",
+        headers: { "Range": "bytes=0-0" },
+        credentials: "include",
+        redirect: "follow"
+      }, timeoutMs, `media.getMediaUrlRedirect ${name}`);
+      const finalUrl = resp.url || "";
+      try {
+        if (resp.body) await resp.body.cancel();
+      } catch (_) {}
+
+      if (resp.redirected && isUsableResolvedMediaUrl(finalUrl, endpoint)) return finalUrl;
+      lastErr = new Error(
+        `media.getMediaUrlRedirect did not return a signed flow-content URL: status=${resp.status || 0} redirected=${!!resp.redirected}`
+      );
+    } catch (e) {
+      lastErr = e;
     }
-    if (typeof item.operation === "string" && item.operation) {
-      out.push({ operation: { name: item.operation } });
-      continue;
-    }
-    if (typeof item.name === "string" && item.name) {
-      out.push({ operation: { name: item.name } });
-    }
+    if (attempt < 2) await sleep(750 * (attempt + 1));
   }
-  return out;
+  throw lastErr || new Error(`VEO media URL resolution failed: media_id=${name}`);
 }
 
 async function archiveWorkflow(tabId, at, workflowId, projectId) {
@@ -1150,7 +1166,7 @@ async function runImageWorkflow(tabId, p, at, runtime) {
   };
 }
 
-async function pollVideo(tabId, at, operations, runtime, p) {
+async function pollVideo(tabId, at, statusRequest, runtime, p) {
   const maxWait = Math.max(60, Number(p.max_wait_seconds || p.timeout_seconds || 600));
   const interval = Math.max(0.5, Number(p.poll_interval_seconds || 5));
   const mode = p.video_mode || "t2v";
@@ -1159,18 +1175,19 @@ async function pollVideo(tabId, at, operations, runtime, p) {
   const deadline = Date.now() + maxWait * 1000;
   let last = {};
   let attempt = 0;
+  const submittedMediaName = Array.isArray(statusRequest?.media) ? String(statusRequest.media[0]?.name || "") : "";
   while (Date.now() < deadline) {
     await sleep(interval * 1000);
     attempt++;
     const tx = await pageFetchJson(tabId, URLS.videoPoll, {
       method: "POST",
       headers: authHeaders(at),
-      body: { operations },
+      body: statusRequest,
       attempts: 1,
       timeoutMs: 45000
     });
     if (tx.status >= 400) throw new Error(`VEO video poll failed: ${compactErrorResponse(tx)}`);
-    last = parseVideoPoll(tx.json);
+    last = parseVideoPoll(tx.json, submittedMediaName);
     const pct = 25 + Math.min(70, Math.floor((Date.now() - (deadline - maxWait * 1000)) / (maxWait * 1000) * 70));
     await runtime.progress(pct, {
       stage: "polling",
@@ -1180,6 +1197,7 @@ async function pollVideo(tabId, at, operations, runtime, p) {
       aspect_ratio: aspectRatio,
       status: last.status,
       workflow_id: last.workflowId,
+      media_id: last.mediaName,
       has_video_url: !!last.videoUrl
     });
     if (last.videoUrl) return last;
@@ -1187,7 +1205,21 @@ async function pollVideo(tabId, at, operations, runtime, p) {
       throw new Error(`VEO video generation failed upstream: status=${last.status || "unknown"} message=${last.errorMessage || ""}`.trim());
     }
     if (isTerminalVideoDoneWithoutUrlStatus(last.status) && !last.videoUrl) {
-      throw new Error(`VEO video generation finished without video url: status=${last.status || "unknown"} workflow_id=${last.workflowId || ""}`);
+      await runtime.progress(pct, {
+        stage: "resolving_media_url",
+        attempt,
+        status: last.status,
+        workflow_id: last.workflowId,
+        media_id: last.mediaName
+      });
+      try {
+        last.videoUrl = await resolveFlowMediaUrl(last.mediaName);
+        return last;
+      } catch (e) {
+        throw new Error(
+          `VEO video generated but signed media url resolution failed: status=${last.status || "unknown"} workflow_id=${last.workflowId || ""} media_id=${last.mediaName || ""} cause=${String((e && e.message) || e || "unknown")}`
+        );
+      }
     }
   }
   throw new Error(`VEO video polling timeout; last=${JSON.stringify(last).slice(0, 300)}`);
@@ -1204,6 +1236,8 @@ async function runVideoWorkflow(tabId, p, at, runtime) {
   const uploaded = [];
   let submitUrl = URLS.videoT2V;
   let reqItem;
+  let submitted = false;
+  let statusRequest = null;
   const aspectRatio = p.extension_video_aspect_ratio || "VIDEO_ASPECT_RATIO_LANDSCAPE";
   let modelKey = p.extension_model_key || "veo_3_1_t2v_fast";
 
@@ -1253,7 +1287,6 @@ async function runVideoWorkflow(tabId, p, at, runtime) {
     }
 
   await runtime.progress(10, { stage: "submit_task", video_mode: mode });
-  let operations = [];
   let submitErr = "";
   const maxVideoSubmitAttempts = 2; // 首次提交 + 失败后连续重试 2 次
   for (let attempt = 0; attempt < maxVideoSubmitAttempts; attempt++) {
@@ -1280,14 +1313,19 @@ async function runVideoWorkflow(tabId, p, at, runtime) {
       });
       if (tx.status >= 400) throw new Error(`VEO video submit failed: ${compactErrorResponse(tx)}`);
       const submitMedia = Array.isArray(tx.json?.media) ? tx.json.media : [];
-      operations = normalizeVideoOperations(submitMedia);
-      if (!operations.length) throw new Error(`VEO video submit missing operations: ${JSON.stringify(tx.json).slice(0, 500)}`);
+      statusRequest = normalizeVideoStatusRequest(submitMedia, projectId);
+      const statusRefs = Array.isArray(statusRequest.media) ? statusRequest.media : statusRequest.operations;
+      if (!Array.isArray(statusRefs) || !statusRefs.length) {
+        throw new Error(`VEO video submit missing status references: ${JSON.stringify(tx.json).slice(0, 500)}`);
+      }
+      submitted = true;
       await runtime.progress(15, {
         stage: "video_submit_ok",
         video_mode: mode,
         model_key: modelKey,
         aspect_ratio: aspectRatio,
-        operations: operations.length
+        operations: statusRefs.length,
+        poll_request_schema: Array.isArray(statusRequest.media) ? "media.name+projectId" : "operations.operation.name"
       });
       break;
     } catch (e) {
@@ -1305,9 +1343,10 @@ async function runVideoWorkflow(tabId, p, at, runtime) {
       }
     }
   }
-  if (!operations.length) throw new Error(submitErr || "VEO video submit failed");
-  await runtime.progress(25, { stage: "polling", video_mode: mode, model_key: modelKey, aspect_ratio: aspectRatio, operations: operations.length });
-  const done = await pollVideo(tabId, at, operations, runtime, p);
+  const statusRefs = statusRequest && (statusRequest.media || statusRequest.operations);
+  if (!Array.isArray(statusRefs) || !statusRefs.length) throw new Error(submitErr || "VEO video submit failed");
+  await runtime.progress(25, { stage: "polling", video_mode: mode, model_key: modelKey, aspect_ratio: aspectRatio, operations: statusRefs.length });
+  const done = await pollVideo(tabId, at, statusRequest, runtime, p);
   const archived = archiveEnabled(p, "archive_workflow") ? await archiveWorkflow(tabId, at, done.workflowId, done.projectId || projectId) : false;
   if (archiveEnabled(p, "archive_uploaded_workflows")) await archiveUploadedWorkflows(tabId, at, uploaded, runtime, "cleanup_uploaded_workflows_done");
   await refreshProjectPageAfterArchive(98, tabId, p.project_page, runtime);
@@ -1326,7 +1365,13 @@ async function runVideoWorkflow(tabId, p, at, runtime) {
   };
   } catch (e) {
     if (archiveEnabled(p, "archive_uploaded_workflows")) await archiveUploadedWorkflows(tabId, at, uploaded, runtime, "cleanup_uploaded_workflows_video_failed");
-    await refreshProjectPageAfterArchive(98, tabId, p.project_page, runtime);
+    const failureProgress = submitted ? 25 : 10;
+    await refreshProjectPageAfterArchive(failureProgress, tabId, p.project_page, runtime, "refresh_project_page_after_failure");
+    if (submitted && e && typeof e === "object") {
+      e.submitted = true;
+      e.retryable = false;
+      e.stage = "polling";
+    }
     throw e;
   }
 }

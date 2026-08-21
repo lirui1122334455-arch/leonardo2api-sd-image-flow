@@ -2970,6 +2970,8 @@
                   <button class="btn btn-outline-secondary btn-sm btn-icon" title="关闭（后台倒计时）" aria-label="关闭" data-act="manualClose" data-mid="${m.id}"><i class="bi bi-x-lg" aria-hidden="true"></i><span class="visually-hidden">关闭</span></button>
                   <button class="btn btn-outline-danger btn-sm btn-icon" title="转移到其他任务类型" aria-label="转移" data-act="transfer" data-mid="${m.id}"><i class="bi bi-arrow-left-right" aria-hidden="true"></i><span class="visually-hidden">转移</span></button>
                   <button class="btn btn-outline-warning btn-sm btn-icon" title="清除指纹窗口本地与服务器缓存，并清空本行已保存的 access_token、额度与会员信息（Roxy：clear_local_cache + clear_server_cache）" aria-label="清缓存" data-act="clearBrowserCache" data-mid="${m.id}"><i class="bi bi-brush" aria-hidden="true"></i><span class="visually-hidden">清缓存</span></button>
+                  ${_isLeonardo ? `<button class="btn btn-outline-info btn-sm text-nowrap" title="抓取当前完整 Cookie 并执行 TLS/JWT/GraphQL 验证" aria-label="抓取Cookie快照" data-act="leonardoCookieCapture" data-mid="${m.id}"><i class="bi bi-database-down" aria-hidden="true"></i><span class="ms-1">抓取 Cookie</span></button>` : ""}
+                  ${_isLeonardo ? `<button class="btn btn-outline-info btn-sm text-nowrap" title="使用内存中保存的 Cookie 快照重新验证，不读取当前窗口 Cookie" aria-label="复测Cookie快照" data-act="leonardoCookieRetest" data-mid="${m.id}"><i class="bi bi-shield-check" aria-hidden="true"></i><span class="ms-1">复测 Cookie</span></button>` : ""}
                   ${_showOpenAccount ? `<button class="btn btn-outline-info btn-sm btn-icon" title="${escapeHtml(_openAccountTitle)}" aria-label="${escapeHtml(_openAccountLabel)}" data-act="openAccount" data-mid="${m.id}"><i class="bi bi-person-plus" aria-hidden="true"></i><span class="visually-hidden">${escapeHtml(_openAccountLabel)}</span></button>` : ""}
                 </div>
               </div>
@@ -3495,6 +3497,12 @@
         }
         if (act === "refreshQuota") {
           return refreshQuota(mappingId);
+        }
+        if (act === "leonardoCookieCapture") {
+          return runLeonardoCookieProbe(mappingId, "capture", el);
+        }
+        if (act === "leonardoCookieRetest") {
+          return runLeonardoCookieProbe(mappingId, "retest", el);
         }
         if (act === "refreshInvite") {
           return refreshInvite(mappingId);
@@ -5212,6 +5220,40 @@
             await postJson(`/api/admin/task-type-windows/${mappingId}/manual-close`, { method: "POST" });
           },
         });
+      }
+
+      function leonardoCookieProbeSummary(d, mode) {
+        const auth = d?.auth || {};
+        const jwt = d?.jwt || {};
+        const gql = d?.graphql || {};
+        const transport = d?.transport || {};
+        const snapshot = d?.snapshot || {};
+        const action = mode === "capture" ? "快照已抓取" : "快照复测";
+        const sessionText = auth.session_present ? "有效" : `无效(${auth.http_status || 0})`;
+        const jwtText = jwt.found ? `JWT ${jwt.ttl_seconds ?? "?"}s` : "无JWT";
+        const gqlText = gql.ok ? `GraphQL正常，余额${gql.remaining_quota ?? "?"}` : `GraphQL失败(${gql.http_status || 0})`;
+        const ipText = transport.proxy_used
+          ? `代理IP ${transport.egress_ip || "未知"}${transport.matches_browser_last_ip ? "，与窗口一致" : "，未确认一致"}`
+          : `直连IP ${transport.egress_ip || "未知"}`;
+        return `${action}：Session${sessionText}；${jwtText}；${gqlText}；${ipText}；Cookie ${snapshot.cookie_count ?? 0}个`;
+      }
+
+      async function runLeonardoCookieProbe(mappingId, mode, btn) {
+        const endpoint = mode === "capture" ? "capture" : "retest";
+        try {
+          setBtnBusy(btn, true, { loadingText: "", keepWidth: false });
+          const d = await postJson(`/api/admin/task-type-windows/${mappingId}/leonardo-cookie-probe/${endpoint}`, { method: "POST" });
+          const summary = leonardoCookieProbeSummary(d, mode);
+          if (btn) btn.title = summary;
+          console.info("Leonardo cookie probe", { mappingId, mode, result: d });
+          toast(summary, d?.success ? "success" : "warning");
+          return d;
+        } catch (e) {
+          toast(e.message || "Leonardo Cookie验证失败", "error");
+          return null;
+        } finally {
+          setBtnBusy(btn, false);
+        }
       }
 
       async function bulkDreaminaLogoutSelected() {

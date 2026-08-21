@@ -586,6 +586,59 @@ curl -X POST https://xxx.xxx.xxx/v1/videos \
 | `error.message` | string | 失败时的错误信息 |
 
 
+## Fish Audio TTS (browser session)
+
+Create an asynchronous TTS task with the logged-in Fish Audio fingerprint window:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/tasks \
+  -H "Authorization: Bearer YOUR_FPBROWSER2API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task_type_code": "fish_audio_workflow",
+    "json": {
+      "text": "Hello from Fish Audio.",
+      "reference_id": "YOUR_FISH_VOICE_ID",
+      "backend": "s2.1-pro",
+      "format": "mp3"
+    }
+  }'
+```
+
+Poll `GET /v1/tasks/{task_id}`. A completed task returns the generated file in
+`result.audio_url`. `text` also accepts the `prompt` alias. The voice ID accepts
+`reference_id`, `voice_id`, `model_id`, or `model`; when omitted, the executor
+tries the account's latest-used voice. Optional controls include `speed`,
+`volume`, `normalize_loudness`, `temperature`, `top_p`, and `latency`.
+
+The workflow captures the web authorization headers in memory and executes the
+site reCAPTCHA in the fingerprint page. It does not store a Fish API key.
+
+## ElevenLabs 音效 / TTS（浏览器登录态）
+
+当前实现复用已登录 ElevenLabs 的指纹浏览器窗口，不保存 ElevenLabs API Key
+或网页令牌。默认生成音效：
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/tasks \
+  -H "Authorization: Bearer YOUR_FPBROWSER2API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task_type_code": "elevenlabs_workflow",
+    "json": {
+      "mode": "sound_effects",
+      "prompt": "a short cinematic camera shutter",
+      "duration_seconds": 1.5,
+      "number_of_generations": 4
+    }
+  }'
+```
+
+TTS 使用同一个任务类型，把 `mode` 改为 `tts`；可传 `voice_id`，不传时会
+选取账号可用音色列表中的第一个音色。完成后轮询 `GET /v1/tasks/{task_id}`，
+`audio_url` 和 `result_urls` 是由本服务托管、可直接下载的绝对 URL。完整参数见
+`ELEVENLABS_PASSTHROUGH_API.md`。
+
 ## 再次声明
 
 本项目是技术研究框架，不保证任何站点的稳定可用性，也不承诺规避第三方风控的成功率。请勿商业化，请勿用于违规批量生成、账号滥用或绕过平台规则的生产用途。

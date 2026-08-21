@@ -189,6 +189,7 @@ GPT_ASSET_MAX_BYTES = 80 * 1024 * 1024
 GPT_ASSET_SIGN_TTL_SEC = max(60, int(os.getenv("GPT_ASSET_SIGN_TTL_SEC", "86400")))
 LEONARDO_ASSET_MAX_BYTES = max(GPT_ASSET_MAX_BYTES, int(os.getenv("LEONARDO_ASSET_MAX_BYTES", str(80 * 1024 * 1024))))
 GPT_PUBLIC_ASSET_DIR = DATA_DIR / "gpt_assets"
+ELEVENLABS_PUBLIC_ASSET_DIR = DATA_DIR / "elevenlabs_assets"
 GPT_PUBLIC_ASSET_MAX_BYTES = GPT_ASSET_MAX_BYTES
 GPT_PUBLIC_ASSET_EXT_BY_TYPE = {
     "image/avif": ".avif",
@@ -820,6 +821,15 @@ def _extract_public_result_urls(result: Any) -> tuple[Optional[str], Optional[st
     if not share_url:
         return None, None, []
     kind = str(result.get("workflow_kind") or result.get("type") or "").strip().lower()
+    if "audio" in kind:
+        audio_urls: list[str] = []
+        for value in result.get("urls") or []:
+            url = _public_one_url(value)
+            if url and url not in audio_urls:
+                audio_urls.append(url)
+        if share_url not in audio_urls:
+            audio_urls.insert(0, share_url)
+        return None, None, audio_urls
     is_image = "image" in kind and "video" not in kind
     if is_image:
         return None, share_url, [share_url]
@@ -835,7 +845,7 @@ def _public_result_source_urls(result: Any) -> list[str]:
         val = result.get(key)
         if isinstance(val, list):
             values.extend(val)
-    for key in ("share_url", "video_url", "image_url", "url"):
+    for key in ("share_url", "video_url", "image_url", "audio_url", "url"):
         values.append(result.get(key))
 
     out: list[str] = []
@@ -1040,12 +1050,23 @@ def _add_absolute_public_asset_urls(payload: Dict[str, Any], request: Request) -
         return out
 
     absolute = [_absolute_url(request, u) for u in public_urls]
+    result_obj = out.get("result")
+    result_kind = (
+        str(result_obj.get("workflow_kind") or result_obj.get("type") or "").strip().lower()
+        if isinstance(result_obj, dict)
+        else ""
+    )
+    is_audio = "audio" in result_kind
     out["public_urls_absolute"] = absolute
-    out["public_image_url_absolute"] = absolute[0]
     out["public_url_absolute"] = absolute[0]
-    out["image_url"] = absolute[0]
     out["url"] = absolute[0]
     out["result_urls"] = absolute
+    if is_audio:
+        out["public_audio_url_absolute"] = absolute[0]
+        out["audio_url"] = absolute[0]
+    else:
+        out["public_image_url_absolute"] = absolute[0]
+        out["image_url"] = absolute[0]
 
     metadata = out.get("metadata")
     if isinstance(metadata, dict):
@@ -1059,10 +1080,15 @@ def _add_absolute_public_asset_urls(payload: Dict[str, Any], request: Request) -
         result = dict(result)
         result["result_urls"] = absolute
         result["public_urls_absolute"] = absolute
-        result["public_image_url_absolute"] = absolute[0]
         result["public_url_absolute"] = absolute[0]
-        result["image_url"] = absolute[0]
         result["url"] = absolute[0]
+        if is_audio:
+            result["public_audio_url_absolute"] = absolute[0]
+            result["audio_url"] = absolute[0]
+            result["urls"] = absolute
+        else:
+            result["public_image_url_absolute"] = absolute[0]
+            result["image_url"] = absolute[0]
         out["result"] = result
     return out
 
@@ -1147,6 +1173,25 @@ def _add_public_result_urls(payload: Dict[str, Any], result: Any) -> Dict[str, A
     if image_url:
         payload["image_url"] = image_url
         payload.setdefault("url", image_url)
+    if isinstance(result, dict):
+        kind = str(result.get("workflow_kind") or result.get("type") or "").strip().lower()
+        audio_url = str(result.get("audio_url") or result.get("url") or "").strip() if "audio" in kind else ""
+        if audio_url:
+            payload["audio_url"] = audio_url
+            payload.setdefault("url", audio_url)
+        public_urls = [
+            str(url or "").strip()
+            for url in (result.get("public_urls") or [])
+            if str(url or "").strip()
+        ]
+        if public_urls:
+            payload["public_urls"] = public_urls
+            metadata["public_urls"] = public_urls
+            payload["public_url"] = public_urls[0]
+            if "audio" in kind:
+                payload["public_audio_url"] = public_urls[0]
+            else:
+                payload["public_image_url"] = public_urls[0]
 
     if proxy_urls:
         metadata["proxy_urls"] = proxy_urls
@@ -1486,6 +1531,28 @@ async def get_public_gpt_asset(filename: str):
         raise HTTPException(status_code=404, detail="asset not found")
     path = (GPT_PUBLIC_ASSET_DIR / name).resolve()
     root = GPT_PUBLIC_ASSET_DIR.resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="asset not found")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="asset not found")
+    return FileResponse(
+        str(path),
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/public/elevenlabs-assets/{filename}")
+async def get_public_elevenlabs_asset(filename: str):
+    name = str(filename or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}-[0-9]{1,2}\.(?:alaw|mp3|opus|pcm|ulaw|wav)", name):
+        raise HTTPException(status_code=404, detail="asset not found")
+    path = (ELEVENLABS_PUBLIC_ASSET_DIR / name).resolve()
+    root = ELEVENLABS_PUBLIC_ASSET_DIR.resolve()
     try:
         path.relative_to(root)
     except ValueError:

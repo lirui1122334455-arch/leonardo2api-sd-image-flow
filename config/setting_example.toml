@@ -81,6 +81,19 @@ auto_trigger_connection = false
 connect_wait_seconds = 1
 timeout_seconds = 45
 
+[elevenlabs_health]
+# Read subscription state only. No audio generation is submitted.
+enabled = true
+startup_delay_min_seconds = 300
+startup_delay_max_seconds = 600
+# One enabled mapping is checked every 40-50 minutes.
+interval_min_seconds = 2400
+interval_max_seconds = 3000
+timeout_seconds = 30
+# A provider-confirmed 401 disables immediately; auth capture timeouts require this many failures.
+auth_failure_confirmations = 2
+disable_on_auth_failure = true
+
 [leonardo_keepalive]
 # Leonardo session warmer. It only probes already-open fingerprint windows.
 enabled = true

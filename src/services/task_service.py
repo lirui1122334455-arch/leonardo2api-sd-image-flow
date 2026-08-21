@@ -80,6 +80,11 @@ def _task_exception_message(exc: BaseException) -> str:
     return exc.__class__.__name__ or "task failed"
 
 
+def _task_error_allows_retry(exc: BaseException) -> bool:
+    """A submitted generation must never be resubmitted after poll failure."""
+    return not bool(getattr(exc, "submitted", False)) and getattr(exc, "retryable", True) is not False
+
+
 class FlowAccountUnavailableError(NonPenalizedTaskError):
     """Flow account/session is not usable; retry may switch to another mapping."""
 
@@ -192,6 +197,8 @@ from .jimeng_task_executor import (
 )
 from .gpt_task_executor import gpt_workflow, refresh_gpt_balance_via_extension, DEFAULT_GPT_TARGET
 from .leonardo_task_executor import DEFAULT_LEONARDO_TARGET, leonardo_workflow
+from .fish_audio_task_executor import fish_audio_workflow
+from .elevenlabs_task_executor import elevenlabs_workflow
 
 
 @dataclass
@@ -305,6 +312,10 @@ def _remaining_quota_exclusive_floor_for_pick(
         return credit_threthold, credit_threthold
     if code == "leonardo_workflow":
         return 1, credit_threthold
+    if code == "fish_audio_workflow":
+        return 1, credit_threthold
+    if code == "elevenlabs_workflow":
+        return 1, credit_threthold
     if code == "gpt_workflow":
         return 1, credit_threthold
     return 3,credit_threthold
@@ -363,11 +374,14 @@ class TaskService:
         self._flow_extension_keepalive_task: Optional[asyncio.Task] = None
         self._flow_light_activity_task: Optional[asyncio.Task] = None
         self._gpt_keepalive_task: Optional[asyncio.Task] = None
+        self._elevenlabs_health_task: Optional[asyncio.Task] = None
         self._leonardo_keepalive_task: Optional[asyncio.Task] = None
         self._flow_health_last_ok: dict[int, float] = {}
         self._flow_health_pick_cursor: int = 0
         self._flow_light_activity_due: dict[int, float] = {}
         self._gpt_keepalive_pick_cursor: int = 0
+        self._elevenlabs_health_pick_cursor: int = 0
+        self._elevenlabs_health_auth_failures: dict[int, int] = {}
         self._leonardo_keepalive_pick_cursor: int = 0
         self._leonardo_keepalive_next_due: dict[int, float] = {}
         self._leonardo_keepalive_graphql_next_due: dict[int, float] = {}
@@ -375,6 +389,8 @@ class TaskService:
         self._leonardo_keepalive_state: dict[int, str] = {}
         self._leonardo_keepalive_last_reason: dict[int, str] = {}
         self._leonardo_keepalive_last_ok: dict[int, float] = {}
+        self._leonardo_session_expires_at: dict[int, int] = {}
+        self._leonardo_session_updated_at: dict[int, int] = {}
         self._leonardo_proxy_warning_logged: set[int] = set()
 
     def set_browser_pool_limit(self, limit: int) -> None:
@@ -389,6 +405,7 @@ class TaskService:
         self.start_dreamina_balance_refresher()
         self.start_flow_account_health_checker()
         self.start_gpt_keepalive_checker()
+        self.start_elevenlabs_health_checker()
         self.start_leonardo_keepalive_checker()
         if self._window_pool_task is not None and not self._window_pool_task.done():
             return
@@ -435,6 +452,10 @@ class TaskService:
         raw = app_config.get_raw_config().get("gpt_keepalive", {})
         return raw if isinstance(raw, dict) else {}
 
+    def _elevenlabs_health_config(self) -> Dict[str, Any]:
+        raw = app_config.get_raw_config().get("elevenlabs_health", {})
+        return raw if isinstance(raw, dict) else {}
+
     def _leonardo_keepalive_config(self) -> Dict[str, Any]:
         raw = app_config.get_raw_config().get("leonardo_keepalive", {})
         return raw if isinstance(raw, dict) else {}
@@ -458,6 +479,33 @@ class TaskService:
         except Exception:
             val = float(default)
         return max(float(minimum), val)
+
+    def _elevenlabs_health_bool(self, key: str, default: bool) -> bool:
+        raw = self._elevenlabs_health_config().get(key, default)
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, (int, float)):
+            return bool(raw)
+        value = str(raw or "").strip().lower()
+        if value in {"1", "true", "yes", "y", "on"}:
+            return True
+        if value in {"0", "false", "no", "n", "off", ""}:
+            return False
+        return bool(default)
+
+    def _elevenlabs_health_float(self, key: str, default: float, *, minimum: float = 0.0) -> float:
+        try:
+            val = float(self._elevenlabs_health_config().get(key, default))
+        except Exception:
+            val = float(default)
+        return max(float(minimum), val)
+
+    def _elevenlabs_health_int(self, key: str, default: int, *, minimum: int = 0) -> int:
+        try:
+            val = int(self._elevenlabs_health_config().get(key, default))
+        except Exception:
+            val = int(default)
+        return max(int(minimum), val)
 
     def _leonardo_keepalive_bool(self, key: str, default: bool) -> bool:
         raw = self._leonardo_keepalive_config().get(key, default)
@@ -533,6 +581,21 @@ class TaskService:
     def _leonardo_keepalive_random_delay(self, min_key: str, max_key: str, default_min: float, default_max: float) -> float:
         lo = self._leonardo_keepalive_float(min_key, default_min, minimum=0.0)
         hi = self._leonardo_keepalive_float(max_key, default_max, minimum=0.0)
+        if hi < lo:
+            hi = lo
+        if hi <= lo:
+            return lo
+        return random.uniform(lo, hi)
+
+    def _elevenlabs_health_random_delay(
+        self,
+        min_key: str,
+        max_key: str,
+        default_min: float,
+        default_max: float,
+    ) -> float:
+        lo = self._elevenlabs_health_float(min_key, default_min, minimum=0.0)
+        hi = self._elevenlabs_health_float(max_key, default_max, minimum=0.0)
         if hi < lo:
             hi = lo
         if hi <= lo:
@@ -621,6 +684,20 @@ class TaskService:
             self._gpt_keepalive_loop(), name="gpt_keepalive_checker"
         )
 
+    def start_elevenlabs_health_checker(self) -> None:
+        """Start the low-frequency ElevenLabs subscription health check."""
+        if not self._elevenlabs_health_bool("enabled", True):
+            return
+        if self._elevenlabs_health_task is not None and not self._elevenlabs_health_task.done():
+            return
+        try:
+            self._window_pool_stop.clear()
+        except Exception:
+            pass
+        self._elevenlabs_health_task = asyncio.create_task(
+            self._elevenlabs_health_loop(), name="elevenlabs_health_checker"
+        )
+
     def start_leonardo_keepalive_checker(self) -> None:
         """Start the low-frequency Leonardo auth/session keepalive loop."""
         if not self._leonardo_keepalive_bool("enabled", True):
@@ -697,6 +774,16 @@ class TaskService:
             gt.cancel()
             try:
                 await gt
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        et = self._elevenlabs_health_task
+        self._elevenlabs_health_task = None
+        if et is not None and not et.done():
+            et.cancel()
+            try:
+                await et
             except asyncio.CancelledError:
                 pass
             except Exception:
@@ -1434,6 +1521,181 @@ class TaskService:
             logger.warning("gpt keepalive skipped: mapping=%s err=%s", mid, e)
             return None
 
+    async def _elevenlabs_health_loop(self) -> None:
+        """Periodically read ElevenLabs subscription state without generating audio."""
+        startup_delay = self._elevenlabs_health_random_delay(
+            "startup_delay_min_seconds",
+            "startup_delay_max_seconds",
+            300.0,
+            600.0,
+        )
+        logger.info("elevenlabs health check scheduled in %.0fs", startup_delay)
+        if await self._flow_sleep_or_stop(startup_delay):
+            return
+
+        while not self._window_pool_stop.is_set():
+            try:
+                row = await self._elevenlabs_health_pick_candidate_row()
+                if row:
+                    await self._elevenlabs_health_probe_mapping(row)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("elevenlabs health check tick skipped: %s", exc)
+
+            interval = self._elevenlabs_health_random_delay(
+                "interval_min_seconds",
+                "interval_max_seconds",
+                2400.0,
+                3000.0,
+            )
+            if await self._flow_sleep_or_stop(interval):
+                return
+
+    async def _elevenlabs_health_pick_candidate_row(self) -> Optional[Dict[str, Any]]:
+        rows = await self._elevenlabs_health_list_mapping_rows()
+        if not rows:
+            return None
+        idx = self._elevenlabs_health_pick_cursor % len(rows)
+        self._elevenlabs_health_pick_cursor += 1
+        return rows[idx]
+
+    async def _elevenlabs_health_list_mapping_rows(self) -> list[Dict[str, Any]]:
+        async with self.db._read_conn() as db:  # type: ignore[attr-defined]
+            import aiosqlite
+
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT
+                  m.*,
+                  m.id AS mapping_id,
+                  t.code AS task_code,
+                  t.default_target_url,
+                  w.window_key,
+                  w.window_name,
+                  s.space_id,
+                  b.vendor,
+                  b.lan_addr,
+                  b.access_key
+                FROM task_type_windows m
+                JOIN task_types t ON t.id = m.task_type_id
+                JOIN windows w ON w.id = m.window_pk
+                JOIN spaces s ON s.id = w.space_pk
+                JOIN browsers b ON b.id = s.browser_id
+                WHERE t.deleted = 0 AND t.enabled = 1
+                  AND t.create_task_handler = 'elevenlabs_workflow'
+                  AND m.deleted = 0 AND m.enabled = 1
+                  AND w.deleted = 0 AND w.enabled = 1
+                  AND b.deleted = 0
+                  AND TRIM(COALESCE(w.window_key, '')) <> ''
+                ORDER BY COALESCE(w.window_sort_num, 999999), m.id
+                """
+            )
+            rows = await cur.fetchall()
+            return [dict(row) for row in rows]
+
+    @staticmethod
+    def _elevenlabs_health_auth_failure_kind(exc: BaseException) -> str:
+        message = str(exc or "").strip().lower()
+        try:
+            status_code = int(getattr(exc, "status_code", 0) or 0)
+        except Exception:
+            status_code = 0
+        capture_timeout = "authorization capture timed out" in message
+        if status_code == 401 and not capture_timeout:
+            return "confirmed"
+        if capture_timeout or any(
+            marker in message
+            for marker in (
+                "login expired",
+                "make sure the fingerprint window is logged in",
+                "sign in",
+                "sign-in",
+            )
+        ):
+            return "suspect"
+        return ""
+
+    async def _elevenlabs_health_probe_mapping(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        mid = int(row.get("mapping_id") or row.get("id") or 0)
+        window_key = str(row.get("window_key") or "").strip()
+        base_url = str(row.get("lan_addr") or row.get("browser_base_url") or "").strip()
+        space_id = str(row.get("space_id") or "").strip()
+        if mid <= 0 or not window_key or not base_url or not space_id:
+            return None
+
+        from .elevenlabs_task_executor import (
+            DEFAULT_ELEVENLABS_TARGET,
+            elevenlabs_fetch_subscription,
+        )
+
+        timeout = self._elevenlabs_health_float("timeout_seconds", 30.0, minimum=5.0)
+        target_url = str(row.get("default_target_url") or "").strip() or DEFAULT_ELEVENLABS_TARGET
+        try:
+            info = await asyncio.wait_for(
+                elevenlabs_fetch_subscription(
+                    browser_vendor=str(row.get("vendor") or "roxy"),
+                    browser_base_url=base_url,
+                    browser_access_key=row.get("access_key"),
+                    space_id=space_id,
+                    window_key=window_key,
+                    target_url=target_url,
+                    headless=_db_bool(row.get("headless"), default=False),
+                    pure_mode=_effective_browser_pure_mode_from_context(row),
+                    timeout_seconds=timeout,
+                ),
+                timeout=max(10.0, timeout + 10.0),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            failure_kind = self._elevenlabs_health_auth_failure_kind(exc)
+            if not failure_kind:
+                logger.warning("elevenlabs health check transient failure: mapping=%s err=%s", mid, exc)
+                return None
+
+            streak = int(self._elevenlabs_health_auth_failures.get(mid, 0)) + 1
+            self._elevenlabs_health_auth_failures[mid] = streak
+            required = self._elevenlabs_health_int("auth_failure_confirmations", 2, minimum=1)
+            confirmed = failure_kind == "confirmed" or streak >= required
+            disable = confirmed and self._elevenlabs_health_bool("disable_on_auth_failure", True)
+            if disable:
+                await self.db.update_task_type_window(mapping_id=mid, enabled=False)
+            logger.warning(
+                "elevenlabs auth health failure: mapping=%s kind=%s streak=%s disabled=%s err=%s",
+                mid,
+                failure_kind,
+                streak,
+                disable,
+                exc,
+            )
+            return None
+
+        self._elevenlabs_health_auth_failures.pop(mid, None)
+        remaining = int((info or {}).get("remaining_quota") or 0)
+        limit = int((info or {}).get("character_limit") or 0)
+        update_kwargs: Dict[str, Any] = {
+            "mapping_id": mid,
+            "remaining_quota": remaining,
+            "sora_remaining_count": remaining,
+            "consecutive_errors": 0,
+        }
+        if limit > 0:
+            update_kwargs["daily_quota"] = limit
+        tier = str((info or {}).get("tier") or "").strip()
+        if tier:
+            update_kwargs["sora_plan_title"] = tier
+        await self.db.update_task_type_window(**update_kwargs)
+        logger.info(
+            "elevenlabs health check ok: mapping=%s tier=%s remaining=%s limit=%s",
+            mid,
+            tier or "-",
+            remaining,
+            limit,
+        )
+        return dict(info or {})
+
     async def _leonardo_keepalive_loop(self) -> None:
         """Low-frequency Leonardo auth/session warmer."""
         startup_delay = self._leonardo_keepalive_random_delay(
@@ -1646,6 +1908,9 @@ class TaskService:
                     probe_graphql=graphql_due,
                     active_auth_capture=self._leonardo_keepalive_bool("active_auth_capture", False),
                     auth_session_probe_enabled=self._leonardo_keepalive_bool("auth_session_probe_enabled", True),
+                    force_server_session_refresh=self._leonardo_keepalive_bool(
+                        "force_server_session_refresh", False
+                    ),
                     session_ping_enabled=self._leonardo_keepalive_bool("session_ping_enabled", True),
                     cf_refresh_ttl_seconds=cf_refresh_ttl,
                     ui_mode_toggle=self._leonardo_keepalive_bool("ui_mode_toggle", False),
@@ -1666,14 +1931,42 @@ class TaskService:
             return None
 
         cookie_state = (result or {}).get("cookie_state")
+        auth_session = (result or {}).get("auth_session")
+        auth_session = auth_session if isinstance(auth_session, dict) else {}
+        try:
+            server_expires_at = int(auth_session.get("session_expires_at") or 0)
+        except Exception:
+            server_expires_at = 0
+        try:
+            server_updated_at = int(auth_session.get("session_updated_at") or 0)
+        except Exception:
+            server_updated_at = 0
+        if server_expires_at > 0:
+            self._leonardo_session_expires_at[mid] = server_expires_at
+        if server_updated_at > 0:
+            self._leonardo_session_updated_at[mid] = server_updated_at
         if isinstance(cookie_state, dict) and cookie_state.get("cookies_checked"):
             logger.info(
-                "leonardo keepalive state: mapping=%s cf_present=%s cf_ttl_seconds=%s better_auth=%s session_data=%s",
+                "leonardo keepalive state: mapping=%s cf_present=%s cf_ttl_seconds=%s "
+                "better_auth=%s session_ttl_seconds=%s session_data=%s",
                 mid,
                 bool(cookie_state.get("cf_access_token_present")),
                 cookie_state.get("cf_access_token_ttl_seconds"),
                 bool(cookie_state.get("better_auth_session_present")),
+                cookie_state.get("better_auth_session_ttl_seconds"),
                 int(cookie_state.get("better_auth_session_data_count") or 0),
+            )
+        if auth_session:
+            logger.info(
+                "leonardo server session: mapping=%s authenticated=%s status=%s "
+                "expires_at=%s expires_in_seconds=%s updated_at=%s updated_age_seconds=%s",
+                mid,
+                auth_session.get("authenticated"),
+                auth_session.get("status"),
+                auth_session.get("session_expires_at"),
+                auth_session.get("session_expires_in_seconds"),
+                auth_session.get("session_updated_at"),
+                auth_session.get("session_updated_age_seconds"),
             )
 
         if bool((result or {}).get("ok")):
@@ -1759,17 +2052,24 @@ class TaskService:
             return result
 
         streak, confirmed = self._leonardo_record_auth_failure(mid, reason)
+        last_server_expiry = self._leonardo_session_expires_at.get(mid)
+        seconds_from_server_expiry = (
+            int(time.time()) - int(last_server_expiry) if last_server_expiry else None
+        )
         if not confirmed:
             delay = self._leonardo_keepalive_random_delay(
                 "suspect_recheck_min_seconds", "suspect_recheck_max_seconds", 45.0, 90.0
             )
             self._leonardo_keepalive_next_due[mid] = time.monotonic() + delay
             logger.warning(
-                "leonardo auth suspect: mapping=%s reason=%s streak=%s retry=%.0fs",
+                "leonardo auth suspect: mapping=%s reason=%s streak=%s retry=%.0fs "
+                "last_server_expiry=%s seconds_from_server_expiry=%s",
                 mid,
                 reason,
                 streak,
                 delay,
+                last_server_expiry,
+                seconds_from_server_expiry,
             )
             return result
 
@@ -3210,12 +3510,28 @@ class TaskService:
             await self.db.update_task(task_id, status="running", progress=0, set_started=True)
             logger.info("task started: %s type=%s window=%s mapping=%s attempt=%d", task_id, picked.task_code, picked.window_pk, picked.mapping_id, _retry_attempt)
 
+            payload = self._task_payloads.get(task_id) or {}
+            if not isinstance(payload, dict):
+                payload = {}
+            if picked.create_task_handler == "leonardo_workflow" and not str(
+                payload.get("_leonardo_generation_id") or ""
+            ).strip():
+                try:
+                    task_row = await self.db.get_task(task_id)
+                    persisted_generation_id = str(getattr(task_row, "generation_id", None) or "").strip()
+                    if persisted_generation_id:
+                        payload["_leonardo_generation_id"] = persisted_generation_id
+                        self._task_payloads[task_id] = payload
+                except Exception:
+                    pass
+
             _last_saved_progress = -1
             _last_saved_stage = ""
+            _last_saved_generation_id = ""
             _last_progress_payload: Dict[str, Any] = {}
 
             async def progress_cb(p: int, _payload: Optional[Dict[str, Any]]):
-                nonlocal _last_saved_progress, _last_saved_stage, _last_progress_payload
+                nonlocal _last_saved_progress, _last_saved_stage, _last_saved_generation_id, _last_progress_payload
                 pi = int(p)
                 payload_info: Dict[str, Any] = {}
                 if isinstance(_payload, dict) and _payload:
@@ -3235,11 +3551,27 @@ class TaskService:
                     and stage != _last_saved_stage
                 )
                 runtime_progress_due = (
-                    picked.create_task_handler == "veo_workflow"
+                    picked.create_task_handler in {"veo_workflow", "leonardo_workflow"}
                     and bool(payload_info)
                     and (stage_due or progress_due)
                 )
-                if not progress_due and not runtime_progress_due:
+                leonardo_generation_id = ""
+                if picked.create_task_handler == "leonardo_workflow":
+                    leonardo_generation_id = str(payload_info.get("generation_id") or "").strip()
+                    if leonardo_generation_id:
+                        payload["_leonardo_generation_id"] = leonardo_generation_id
+                        resume_meta = {
+                            str(k): v
+                            for k, v in payload_info.items()
+                            if str(k) not in {"stage", "generation_id", "status", "video_url_found", "attempt"}
+                        }
+                        if resume_meta:
+                            payload["_leonardo_resume_meta"] = resume_meta
+                        self._task_payloads[task_id] = payload
+                generation_due = bool(
+                    leonardo_generation_id and leonardo_generation_id != _last_saved_generation_id
+                )
+                if not progress_due and not runtime_progress_due and not generation_due:
                     return
                 try:
                     update_kwargs: Dict[str, Any] = {}
@@ -3254,16 +3586,19 @@ class TaskService:
                                 "updated_at": datetime.now().isoformat(timespec="seconds"),
                             }
                         }
+                    if generation_due:
+                        update_kwargs["generation_id"] = leonardo_generation_id
                     if update_kwargs:
                         await self.db.update_task(task_id, **update_kwargs)
                     if progress_due:
                         _last_saved_progress = pi
                     if stage_due:
                         _last_saved_stage = stage
+                    if generation_due:
+                        _last_saved_generation_id = leonardo_generation_id
                 except Exception:
                     pass
 
-            payload = self._task_payloads.get(task_id) or {}
             prompt = str(payload.get("prompt") or "").strip()
             target_url = str(payload.get("sora_url") or "https://sora.chatgpt.com/drafts").strip()
             try:
@@ -3404,6 +3739,47 @@ class TaskService:
                             timeout_seconds=float(picked.timeout_seconds),
                             access_token=picked.sora_access_token,
                             access_expires=picked.sora_access_expires,
+                            default_target_url=picked.default_target_url,
+                            headless=picked.headless,
+                            pure_mode=picked.pure_mode,
+                            db=self.db,
+                            task_type_window_id=picked.mapping_id,
+                        ),
+                        timeout=float(picked.timeout_seconds),
+                    )
+                elif picked.create_task_handler == "fish_audio_workflow":
+                    fish_payload = dict(payload or {})
+                    result = await asyncio.wait_for(
+                        fish_audio_workflow(
+                            fish_payload,
+                            progress_cb,
+                            browser_vendor=picked.browser_vendor,
+                            browser_base_url=picked.browser_base_url,
+                            browser_access_key=picked.browser_access_key,
+                            space_id=picked.space_id,
+                            window_key=picked.window_key,
+                            timeout_seconds=float(picked.timeout_seconds),
+                            default_target_url=picked.default_target_url,
+                            headless=picked.headless,
+                            pure_mode=picked.pure_mode,
+                            db=self.db,
+                            task_type_window_id=picked.mapping_id,
+                        ),
+                        timeout=float(picked.timeout_seconds),
+                    )
+                elif picked.create_task_handler == "elevenlabs_workflow":
+                    elevenlabs_payload = dict(payload or {})
+                    result = await asyncio.wait_for(
+                        elevenlabs_workflow(
+                            elevenlabs_payload,
+                            progress_cb,
+                            browser_vendor=picked.browser_vendor,
+                            browser_base_url=picked.browser_base_url,
+                            browser_access_key=picked.browser_access_key,
+                            space_id=picked.space_id,
+                            window_key=picked.window_key,
+                            timeout_seconds=float(picked.timeout_seconds),
+                            task_id=task_id,
                             default_target_url=picked.default_target_url,
                             headless=picked.headless,
                             pure_mode=picked.pure_mode,
@@ -3568,10 +3944,17 @@ class TaskService:
                         err_msg = f"{err_msg}; last Flow stage: {stage}"
                 no_penalty = bool(getattr(e, "no_penalty", False))
                 status_code = getattr(e, "status_code", None)
+                submitted = bool(getattr(e, "submitted", False))
+                retryable = _task_error_allows_retry(e)
                 err_result: Dict[str, Any] = {
                     "error_type": e.__class__.__name__,
                     "no_penalty": no_penalty,
+                    "submitted": submitted,
+                    "retryable": retryable,
                 }
+                error_stage = str(getattr(e, "stage", None) or "").strip()
+                if error_stage:
+                    err_result["error_stage"] = error_stage
                 if _last_progress_payload:
                     err_result["last_progress"] = _last_progress_payload
                 if "public_error_minor_upload" in err_msg.lower():
@@ -3599,6 +3982,11 @@ class TaskService:
                 )
                 # ---- 错误重试逻辑 ----
                 max_retries = picked.error_retry_count
+                leonardo_resume_generation_id = (
+                    str(payload.get("_leonardo_generation_id") or "").strip()
+                    if picked.create_task_handler == "leonardo_workflow"
+                    else ""
+                )
                 flow_switch_retry_limit = self._flow_health_int(
                     "account_switch_max_retries",
                     3,
@@ -3622,24 +4010,33 @@ class TaskService:
                     except Exception:
                         leonardo_remaining_accounts = 0
                 can_retry = (
-                    flow_account_unavailable
+                    retryable
+                    and bool(leonardo_resume_generation_id)
+                    and _retry_attempt < leonardo_switch_retry_limit
+                ) or (
+                    retryable
+                    and flow_account_unavailable
                     and _allow_account_switch
                     and flow_remaining_accounts > 0
                     and _retry_attempt < flow_switch_retry_limit
                 ) or (
-                    leonardo_switchable_error
+                    retryable
+                    and leonardo_switchable_error
                     and _allow_account_switch
                     and leonardo_remaining_accounts > 1
                     and _retry_attempt < leonardo_switch_retry_limit
                     and not _is_violation
                 ) or (
-                    (not flow_account_unavailable)
+                    retryable
+                    and (not flow_account_unavailable)
                     and (not leonardo_switchable_error)
                     and max_retries > 0
                     and _retry_attempt < max_retries
                     and not _is_violation
                 )
-                if flow_account_unavailable:
+                if leonardo_resume_generation_id:
+                    retry_limit_label = leonardo_switch_retry_limit
+                elif flow_account_unavailable:
                     retry_limit_label = flow_switch_retry_limit
                 elif leonardo_switchable_error:
                     retry_limit_label = leonardo_switch_retry_limit
@@ -3657,7 +4054,11 @@ class TaskService:
                             Task(
                                 task_id=archive_id,
                                 task_type_code=picked.task_code,
-                                generation_id=None,
+                                generation_id=(
+                                    str(_last_progress_payload.get("generation_id") or "").strip()
+                                    or str(payload.get("_leonardo_generation_id") or "").strip()
+                                    or None
+                                ),
                                 status="failed",
                                 progress=0,
                                 prompt=prompt_text,
@@ -3700,7 +4101,7 @@ class TaskService:
                     )
                 # 某些错误不应计入“窗口连续错误”（例如：Sora create 400 invalid_request、未抓到 POST 等环境/请求错误）
                 # 执行器侧会抛出带 no_penalty=true 的异常（或同名属性），这里做兼容判断。
-                if leonardo_switchable_error:
+                if leonardo_switchable_error and not leonardo_resume_generation_id:
                     try:
                         short_cd = self._leonardo_keepalive_int(
                             "task_switch_cooldown_seconds",
@@ -3732,6 +4133,14 @@ class TaskService:
                             picked.mapping_id,
                             cool_exc,
                         )
+                elif picked.create_task_handler == "leonardo_workflow" and leonardo_resume_generation_id:
+                    logger.warning(
+                        "leonardo generation recovery keeps original mapping active: mapping=%s task=%s generation=%s err=%s",
+                        picked.mapping_id,
+                        task_id,
+                        leonardo_resume_generation_id,
+                        err_msg,
+                    )
                 elif not no_penalty and not picked.create_task_handler == "sora_wm_remove":
                     await self.db.mark_mapping_error(
                         picked.mapping_id,
@@ -3777,6 +4186,12 @@ class TaskService:
                                     window_key=picked.window_key,
                                 )
                                 d_sess._schedule_idle_close()
+                            elif (picked.create_task_handler or "").strip() == "leonardo_workflow":
+                                logger.info(
+                                    "leonardo browser close skipped after task error: mapping=%s task=%s",
+                                    picked.mapping_id,
+                                    task_id,
+                                )
                             else:
                                 sess = get_or_create_sora_session(
                                     vendor=picked.browser_vendor,
@@ -3824,8 +4239,13 @@ class TaskService:
                     payload = self._task_payloads.get(task_id) or {}
                     _retry_gen_id = str(payload.get("generation_id") or "").strip() or None
                     _retry_head_url = str(payload.get("head_url") or "").strip() or None
+                    _leonardo_retry_generation_id = str(
+                        payload.get("_leonardo_generation_id") or ""
+                    ).strip() or None
                     _bind_window_pk: Optional[int] = None
                     if _retry_gen_id and _retry_head_url:
+                        _bind_window_pk = picked.window_pk
+                    if picked.create_task_handler == "leonardo_workflow" and _leonardo_retry_generation_id:
                         _bind_window_pk = picked.window_pk
 
                     self._ensure_dispatcher()
@@ -3860,7 +4280,12 @@ class TaskService:
                                     retry_attempt=_retry_attempt + 1,
                                     required_window_pk=_bind_window_pk,
                                     is_dedicated_window=_is_dedicated_window,
-                                    allow_account_switch=_allow_account_switch,
+                                    allow_account_switch=(
+                                        False
+                                        if picked.create_task_handler == "leonardo_workflow"
+                                        and _leonardo_retry_generation_id
+                                        else _allow_account_switch
+                                    ),
                                 )
                             )
                             _retry_queue_size = len(self._pending_queue)
