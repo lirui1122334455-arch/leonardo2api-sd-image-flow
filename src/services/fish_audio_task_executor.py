@@ -24,7 +24,7 @@ MONITOR_LOG_FILE = Path("logs/fish_audio_monitor.log")
 
 _AUTH_CACHE_SECONDS = 300.0
 _AUTH_CACHE: Dict[str, tuple[float, Dict[str, str]]] = {}
-_SUPPORTED_FORMATS = {"mp3", "wav", "pcm", "opus"}
+_SUPPORTED_FORMATS = {"mp3", "pcm"}
 
 
 def _one_str(value: Any) -> str:

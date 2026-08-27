@@ -46,6 +46,16 @@ class FishAudioTestUiTests(unittest.TestCase):
         self.assertIn('if (!audioWorkflow && !zarkLab && cardKeyIdRaw)', html)
         self.assertIn('if (!audioWorkflow && !zarkLab && duration !== undefined', html)
 
+    def test_fish_formats_match_web_task_endpoint(self):
+        html = TEST_PAGE.read_text(encoding="utf-8")
+
+        self.assertIn('<option value="mp3">MP3</option>', html)
+        self.assertIn('<option value="pcm">PCM</option>', html)
+        self.assertNotIn('<option value="wav">WAV</option>', html)
+        self.assertNotIn('<option value="opus">OPUS</option>', html)
+        self.assertIn('new Set(["mp3", "pcm"]).has(fishFormatEl.value)', html)
+        self.assertIn('lsSet(LS_KEYS.testFishFormat, "mp3")', html)
+
 
 if __name__ == "__main__":
     unittest.main()

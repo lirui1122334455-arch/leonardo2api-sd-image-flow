@@ -334,9 +334,7 @@
                       <label class="form-label">format</label>
                       <select class="form-select" id="fishFormat">
                         <option value="mp3">MP3</option>
-                        <option value="wav">WAV</option>
                         <option value="pcm">PCM</option>
-                        <option value="opus">OPUS</option>
                       </select>
                     </div>
                     <div class="col-6 col-md-4">
@@ -555,6 +553,14 @@
                   <option value="4k">4K</option>
                 </select>
               </div>
+              <div class="mb-3" id="adobeImage2QualityWrap" style="display: none;">
+                <label class="form-label">Adobe GPT Image 2 质量</label>
+                <select class="form-select" id="adobeImage2Quality">
+                  <option value="low">Low</option>
+                  <option value="medium" selected>Medium</option>
+                  <option value="high">High</option>
+                </select>
+              </div>
               <div class="mb-3 form-check" id="headlessModeWrap">
                 <input class="form-check-input" type="checkbox" id="headlessMode" />
                 <label class="form-check-label" for="headlessMode">无头模式打开窗口</label>
@@ -768,7 +774,17 @@
 
       function isGptType(typeCode) {
         const t = taskTypeByCode.get(typeCode);
-        return typeCode === "gpt_workflow" || String(t?.create_task_handler || "").trim() === "gpt_workflow";
+        const handler = String(t?.create_task_handler || "").trim();
+        return typeCode === "gpt_workflow"
+          || typeCode === "adobe_image2_workflow"
+          || handler === "gpt_workflow"
+          || handler === "adobe_image2_workflow";
+      }
+
+      function isAdobeImage2Type(typeCode) {
+        const t = taskTypeByCode.get(typeCode);
+        return typeCode === "adobe_image2_workflow"
+          || String(t?.create_task_handler || "").trim() === "adobe_image2_workflow";
       }
 
       function isLeonardoType(typeCode) {
@@ -1173,6 +1189,7 @@
         const isZarkLab = isZarkLabType(type);
         const isFishAudio = isFishAudioType(type);
         const isElevenLabs = isElevenLabsType(type);
+        const isAdobeImage2 = isAdobeImage2Type(type);
         const isAudioWorkflow = isFishAudio || isElevenLabs;
         const videoModelWrap = document.getElementById("videoModelWrap");
         if (videoModelWrap) videoModelWrap.style.display = type === "veo_workflow" ? "" : "none";
@@ -1193,9 +1210,11 @@
         const imageAspectRatioWrap = document.getElementById("imageAspectRatioWrap");
         if (imageAspectRatioWrap) imageAspectRatioWrap.style.display = (isDreamina || isZarkLab || isAudioWorkflow) ? "none" : "";
         const imageSizeWrap = document.getElementById("imageSizeWrap");
-        if (imageSizeWrap) imageSizeWrap.style.display = (isDreamina || isZarkLab || isAudioWorkflow) ? "none" : "";
+        if (imageSizeWrap) imageSizeWrap.style.display = (isDreamina || isZarkLab || isAudioWorkflow || isAdobeImage2) ? "none" : "";
         const imageResolutionWrap = document.getElementById("imageResolutionWrap");
-        if (imageResolutionWrap) imageResolutionWrap.style.display = (isDreamina || isZarkLab || isAudioWorkflow) ? "none" : "";
+        if (imageResolutionWrap) imageResolutionWrap.style.display = (isDreamina || isZarkLab || isAudioWorkflow || isAdobeImage2) ? "none" : "";
+        const adobeImage2QualityWrap = document.getElementById("adobeImage2QualityWrap");
+        if (adobeImage2QualityWrap) adobeImage2QualityWrap.style.display = isAdobeImage2 ? "" : "none";
         const durationWrap = document.getElementById("durationWrap");
         if (durationWrap) durationWrap.style.display = (isDreamina || isZarkLab || isAudioWorkflow) ? "none" : "";
         const promptLabel = document.getElementById("promptLabel");
@@ -1467,17 +1486,27 @@
           if (isGptType(type)) {
             payload.duration = 1;
             payload.workflow_kind = "image";
-            payload.model = `gpt-image2-${imageResolution}`;
-            payload.model_code = "gpt-image-2";
-            payload.image_model_name = "gpt-image-2";
-            payload.gpt_image2_model = payload.model;
-            payload.resolution = imageResolution;
-            payload.size_tier = imageResolution.toUpperCase();
+            const isAdobeImage2 = isAdobeImage2Type(type);
+            if (isAdobeImage2) {
+              payload.quality = String(document.getElementById("adobeImage2Quality")?.value || "medium");
+              payload.model = `adobe-gpt-image2-${payload.quality}`;
+              payload.adobe_model = payload.model;
+              if (imageAspectRatio && !new Set(["1:1", "3:2", "2:3"]).has(imageAspectRatio)) {
+                throw new Error("Adobe GPT Image 2 只支持 Auto、3:2、1:1、2:3 比例");
+              }
+            } else {
+              payload.model = `gpt-image2-${imageResolution}`;
+              payload.model_code = "gpt-image-2";
+              payload.image_model_name = "gpt-image-2";
+              payload.gpt_image2_model = payload.model;
+              payload.resolution = imageResolution;
+              payload.size_tier = imageResolution.toUpperCase();
+              if (imageSize) payload.size = imageSize;
+            }
             if (imageAspectRatio) {
               payload.aspect_ratio = imageAspectRatio;
               payload.ratio = imageAspectRatio;
             }
-            if (imageSize) payload.size = imageSize;
           }
           if (zarkLab) {
             const zarklabModel = String(document.getElementById("zarklabModel")?.value || "zark-seedance-2.5");
@@ -1877,7 +1906,11 @@
         const fishVoiceAgeEl = bindValueCache("fishVoiceAge", LS_KEYS.testFishAge, "change");
         bindValueCache("fishCustomVoiceId", LS_KEYS.testFishCustomVoiceId);
         bindValueCache("fishBackend", LS_KEYS.testFishBackend);
-        bindValueCache("fishFormat", LS_KEYS.testFishFormat, "change");
+        const fishFormatEl = bindValueCache("fishFormat", LS_KEYS.testFishFormat, "change");
+        if (fishFormatEl && !new Set(["mp3", "pcm"]).has(fishFormatEl.value)) {
+          fishFormatEl.value = "mp3";
+          lsSet(LS_KEYS.testFishFormat, "mp3");
+        }
         bindValueCache("fishSpeed", LS_KEYS.testFishSpeed);
         bindValueCache("fishVolume", LS_KEYS.testFishVolume);
         bindValueCache("fishTemperature", LS_KEYS.testFishTemperature);

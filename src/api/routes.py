@@ -34,6 +34,10 @@ from ..core.public_api_limits import (
 )
 from ..services.leonardo_task_executor import LEONARDO_PUBLIC_MODEL_ALIASES
 from ..services.zarklab_task_executor import ZARKLAB_PUBLIC_MODEL_ALIASES
+from ..services.adobe_image2_task_executor import (
+    ADOBE_IMAGE2_PUBLIC_ASSET_DIR,
+    ADOBE_IMAGE2_PUBLIC_MODEL_ALIASES,
+)
 from ..services.task_service import TaskService
 from ..services.task_handler_registry import CreateTaskContext, get_create_task_handler
 
@@ -121,6 +125,7 @@ OPENAI_COMPAT_VIDEO_MODELS = (
     "gpt-image2-1k",
     "gpt-image2-2k",
     "gpt-image2-4k",
+    *ADOBE_IMAGE2_PUBLIC_MODEL_ALIASES.keys(),
 )
 OPENAI_COMPAT_VIDEO_MODEL_SET = set(OPENAI_COMPAT_VIDEO_MODELS)
 OPENAI_COMPAT_VIDEO_MODEL_KEY_SET = {m.lower() for m in OPENAI_COMPAT_VIDEO_MODELS}
@@ -674,6 +679,14 @@ def _normalize_video_task_payload(payload: Dict[str, Any]) -> tuple[str, Dict[st
             raise HTTPException(status_code=400, detail="gemini-omni only supports duration=4, 6, 8, or 10")
         payload["duration"] = duration_i
         payload["model"] = "gemini-omni"
+    elif model_key in ADOBE_IMAGE2_PUBLIC_MODEL_ALIASES:
+        task_type_code = "adobe_image2_workflow"
+        payload["duration"] = 1
+        payload["workflow_kind"] = "image"
+        payload["model"] = model_key
+        payload["adobe_model"] = model_key
+        payload["provider_model"] = "gpt-image@2"
+        payload["quality"] = ADOBE_IMAGE2_PUBLIC_MODEL_ALIASES[model_key]
     elif model_key in GPT_IMAGE2_VIDEO_MODELS or model_key in GPT_IMAGE2_ALIAS_MODELS:
         task_type_code = "gpt_workflow"
         payload = _normalize_gpt_image2_video_payload(payload, model_key)
@@ -1559,6 +1572,28 @@ async def get_public_elevenlabs_asset(filename: str):
         raise HTTPException(status_code=404, detail="asset not found")
     path = (ELEVENLABS_PUBLIC_ASSET_DIR / name).resolve()
     root = ELEVENLABS_PUBLIC_ASSET_DIR.resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="asset not found")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="asset not found")
+    return FileResponse(
+        str(path),
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/public/adobe-image2-assets/{filename}")
+async def get_public_adobe_image2_asset(filename: str):
+    name = str(filename or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}-[0-9]{1,2}\.(?:avif|gif|jpg|jpeg|png|webp)", name):
+        raise HTTPException(status_code=404, detail="asset not found")
+    path = (ADOBE_IMAGE2_PUBLIC_ASSET_DIR / name).resolve()
+    root = ADOBE_IMAGE2_PUBLIC_ASSET_DIR.resolve()
     try:
         path.relative_to(root)
     except ValueError:

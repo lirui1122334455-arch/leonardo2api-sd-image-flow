@@ -200,6 +200,7 @@ from .leonardo_task_executor import DEFAULT_LEONARDO_TARGET, leonardo_workflow
 from .fish_audio_task_executor import fish_audio_workflow
 from .elevenlabs_task_executor import elevenlabs_workflow
 from .zarklab_task_executor import zarklab_workflow
+from .adobe_image2_task_executor import adobe_image2_workflow
 
 
 @dataclass
@@ -3771,6 +3772,27 @@ class TaskService:
                             timeout_seconds=float(picked.timeout_seconds),
                             access_token=picked.sora_access_token,
                             access_expires=picked.sora_access_expires,
+                            default_target_url=picked.default_target_url,
+                            headless=picked.headless,
+                            pure_mode=picked.pure_mode,
+                            db=self.db,
+                            task_type_window_id=picked.mapping_id,
+                        ),
+                        timeout=float(picked.timeout_seconds),
+                    )
+                elif picked.create_task_handler == "adobe_image2_workflow":
+                    adobe_payload = dict(payload or {})
+                    result = await asyncio.wait_for(
+                        adobe_image2_workflow(
+                            adobe_payload,
+                            progress_cb,
+                            browser_vendor=picked.browser_vendor,
+                            browser_base_url=picked.browser_base_url,
+                            browser_access_key=picked.browser_access_key,
+                            space_id=picked.space_id,
+                            window_key=picked.window_key,
+                            timeout_seconds=float(picked.timeout_seconds),
+                            task_id=task_id,
                             default_target_url=picked.default_target_url,
                             headless=picked.headless,
                             pure_mode=picked.pure_mode,

@@ -36,17 +36,29 @@ class FishAudioTaskBodyTests(unittest.TestCase):
         self.assertEqual(body["parameters"]["text"], "test")
         self.assertEqual(body["sampler"], {"temperature": 0.7, "top_p": 0.9})
 
+    def test_accepts_pcm_format(self):
+        body = _build_fish_task_body(
+            {"text": "test", "format": "pcm"},
+            reference_id="voice-456",
+            recaptcha="token",
+        )
+
+        self.assertEqual(body["format"], "pcm")
+        self.assertEqual(body["parameters"]["format"], "pcm")
+
     def test_rejects_missing_text(self):
         with self.assertRaises(NonPenalizedTaskError):
             _build_fish_task_body({}, reference_id="voice", recaptcha="token")
 
-    def test_rejects_unknown_format(self):
-        with self.assertRaises(NonPenalizedTaskError):
-            _build_fish_task_body(
-                {"text": "hello", "format": "aac"},
-                reference_id="voice",
-                recaptcha="token",
-            )
+    def test_rejects_unsupported_web_formats(self):
+        for audio_format in ("wav", "opus", "aac"):
+            with self.subTest(audio_format=audio_format):
+                with self.assertRaises(NonPenalizedTaskError):
+                    _build_fish_task_body(
+                        {"text": "hello", "format": audio_format},
+                        reference_id="voice",
+                        recaptcha="token",
+                    )
 
 
 if __name__ == "__main__":

@@ -694,6 +694,31 @@ class Database:
                 ),
             )
 
+        # Adobe Firefly is a separate provider even though it exposes the same
+        # GPT Image 2 model name. Its window pool and credits stay isolated
+        # from ChatGPT mappings.
+        cur = await db.execute("SELECT COUNT(*) FROM task_types WHERE code = ?", ("adobe_image2_workflow",))
+        if int((await cur.fetchone())[0] or 0) == 0:
+            await db.execute(
+                """
+                INSERT INTO task_types (
+                    name, code, project_id, concurrency,
+                    continuous_error_threshold, continuous_error_close_window_threshold,
+                    timeout_seconds, window_call_cooldown_seconds,
+                    create_task_handler, refresh_quota_handler,
+                    default_target_url, enabled, deleted
+                )
+                VALUES (?, ?, NULL, 1, 3, 3, 900, 30, ?, ?, ?, 1, 0)
+                """,
+                (
+                    "Adobe GPT Image 2",
+                    "adobe_image2_workflow",
+                    "adobe_image2_workflow",
+                    "adobe_firefly_credits",
+                    "https://firefly.adobe.com/studio",
+                ),
+            )
+
         # Zark Lab video channel. Window mappings remain explicit so startup
         # never attaches an unrelated logged-in fingerprint window.
         cur = await db.execute("SELECT COUNT(*) FROM task_types WHERE code = ?", ("zarklab_video",))

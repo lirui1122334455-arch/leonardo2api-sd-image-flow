@@ -84,6 +84,13 @@ def _admin_manual_open_target_url(ctx_row: Dict[str, Any]) -> str:
             return str(DEFAULT_GPT_TARGET or "").strip() or "https://chatgpt.com/"
         except Exception:
             return "https://chatgpt.com/"
+    if handler == "adobe_image2_workflow":
+        try:
+            from ..services.adobe_image2_task_executor import DEFAULT_ADOBE_IMAGE2_TARGET
+
+            return str(DEFAULT_ADOBE_IMAGE2_TARGET or "").strip() or "https://firefly.adobe.com/studio"
+        except Exception:
+            return "https://firefly.adobe.com/studio"
     if handler == "fish_audio_workflow":
         try:
             from ..services.fish_audio_task_executor import DEFAULT_FISH_AUDIO_TARGET  # type: ignore
@@ -5440,6 +5447,11 @@ async def refresh_mapping_remaining_quota(
 
         fn = refresh_quota__gpt_balance
         handler_used = "gpt_balance"
+    elif create_handler == "adobe_image2_workflow":
+        from ..services.task_handler_registry import refresh_quota__adobe_firefly_credits
+
+        fn = refresh_quota__adobe_firefly_credits
+        handler_used = "adobe_firefly_credits"
     elif create_handler == "leonardo_workflow":
         from ..services.task_handler_registry import refresh_quota__leonardo_tokens
 
@@ -5662,6 +5674,41 @@ async def refresh_mapping_subscription_info(mapping_id: int, headless: bool = Fa
             "subscription_end": None,
             "source": (info or {}).get("source") or "extension.membership",
             "raw": (info or {}).get("raw"),
+        }
+
+    if handler == "adobe_image2_workflow":
+        from ..services.adobe_image2_task_executor import (
+            DEFAULT_ADOBE_IMAGE2_TARGET,
+            adobe_fetch_account_in_window,
+            persist_adobe_account_info,
+        )
+
+        try:
+            info = await adobe_fetch_account_in_window(
+                browser_vendor=vendor,
+                browser_base_url=base_url,
+                browser_access_key=access_key,
+                space_id=space_id,
+                window_key=window_key,
+                target_url=str(ctx_row.get("default_target_url") or "").strip() or DEFAULT_ADOBE_IMAGE2_TARGET,
+                headless=headless,
+                pure_mode=bool(ctx_row.get("pure_mode")) if ctx_row.get("pure_mode") is not None else True,
+                timeout_seconds=60.0,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"刷新 Adobe 账号信息失败：{e}")
+        plan_title = str((info or {}).get("plan_title") or "Adobe Firefly").strip()
+        reset = str((info or {}).get("next_reset") or "").strip()
+        await persist_adobe_account_info(db, mapping_id, info or {})
+        return {
+            "success": True,
+            "mapping_id": mapping_id,
+            "plan_title": plan_title,
+            "subscription_end": reset or None,
+            "remaining_quota": int((info or {}).get("remaining_quota") or 0),
+            "provisioned_quota": int((info or {}).get("provisioned_quota") or 0),
+            "platform_account": (info or {}).get("platform_account"),
+            "source": "adobe.firefly.account",
         }
 
     if handler == "veo_workflow":

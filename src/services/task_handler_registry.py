@@ -98,6 +98,7 @@ CREATE_TASK_HANDLERS: Dict[str, Tuple[str, CreateTaskHandler]] = {
     "sora_plus_register": ("Sora注册Plus）", create_task__sora_gen_video),
     "veo_workflow": ("veo生成视频", create_task__sora_gen_video),
     "gpt_workflow": ("GPT/ChatGPT 图片/视频生成（浏览器插件；长 access_token）", create_task__sora_gen_video),
+    "adobe_image2_workflow": ("Adobe Firefly GPT Image 2（指纹浏览器登录会话）", create_task__sora_gen_video),
     "grok_workflow": ("Grok Imagine 视频（指纹浏览器：文生/多图参考；可选 mapping SSO 或 payload grok_access_token）", create_task__sora_gen_video),
     "dreamina_workflow": ("Dreamina Seedance 视频生成（指纹浏览器：文生/图生；Cookie 鉴权）", create_task__sora_gen_video),
     "fish_audio_workflow": ("Fish Audio TTS（指纹浏览器登录会话）", create_task__sora_gen_video),
@@ -328,6 +329,51 @@ async def refresh_quota__gpt_balance(ctx: RefreshQuotaContext) -> int:
     return await refresh_gpt_balance(ctx)
 
 
+async def refresh_quota__adobe_firefly_credits(ctx: RefreshQuotaContext) -> int:
+    """Adobe Firefly: read the logged-in account's generative credit balance."""
+    row = ctx.mapping_row or {}
+    space_id = str(row.get("space_id") or "")
+    window_key = str(row.get("window_key") or "")
+    base_url = str(row.get("lan_addr") or "").strip()
+    if not space_id or not window_key or not base_url:
+        raise RuntimeError("mapping missing lan_addr/space_id/window_key; cannot read Adobe credits")
+
+    from .adobe_image2_task_executor import (
+        DEFAULT_ADOBE_IMAGE2_TARGET,
+        adobe_fetch_account_in_window,
+        persist_adobe_account_info,
+    )
+
+    def _row_bool(key: str, default: bool = False) -> bool:
+        value = row.get(key)
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    info = await adobe_fetch_account_in_window(
+        browser_vendor=str(row.get("vendor") or "roxy"),
+        browser_base_url=base_url,
+        browser_access_key=row.get("access_key"),
+        space_id=space_id,
+        window_key=window_key,
+        target_url=str(row.get("default_target_url") or "").strip() or DEFAULT_ADOBE_IMAGE2_TARGET,
+        headless=_row_bool("_headless", _row_bool("headless", False)),
+        pure_mode=_row_bool("pure_mode", True),
+        timeout_seconds=45.0,
+    )
+    remaining = int(info.get("remaining_quota") or 0)
+    await persist_adobe_account_info(
+        ctx.db,
+        int(row.get("id") or row.get("mapping_id") or 0),
+        info,
+    )
+    return remaining
+
+
 async def refresh_quota__leonardo_tokens(ctx: RefreshQuotaContext) -> int:
     """Leonardo: read Fast Tokens from the logged-in app GraphQL session."""
     row = ctx.mapping_row or {}
@@ -481,6 +527,7 @@ REFRESH_QUOTA_HANDLERS: Dict[str, Tuple[str, RefreshQuotaHandler]] = {
     "veo_flow_credits": ("VEO/Labs：优先插件读取 credits，失败回退两层代理", refresh_quota__veo_flow_credits),
     "dreamina_credits": ("Dreamina：指纹窗口内读取余额（commerce API，total_credit）", refresh_quota__dreamina_credits),
     "gpt_balance": ("GPT/ChatGPT：两层代理刷新余额/账号信息（需长 AT）", refresh_quota__gpt_balance),
+    "adobe_firefly_credits": ("Adobe Firefly：读取账号 generative credits", refresh_quota__adobe_firefly_credits),
     "leonardo_tokens": ("Leonardo：读取 Fast Tokens（GraphQL）", refresh_quota__leonardo_tokens),
     "elevenlabs_credits": ("ElevenLabs：读取网页订阅剩余额度", refresh_quota__elevenlabs_credits),
     "zarklab_credits": ("Zark Lab：不生成内容，读取可用 credits", refresh_quota__zarklab_credits),
