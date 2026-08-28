@@ -5,6 +5,25 @@
 本接口复用已经登录 Adobe Firefly 的指纹浏览器窗口生成图片。下游不需要提供
 Adobe Token、Cookie 或账号信息，只需要使用 fpbrowser2api 自己的 API Key。
 
+当前服务可以绑定多个 Adobe 账号。下游请求不感知具体账号和窗口，服务会在已启用、
+有剩余额度且并发可用的 Adobe 映射中自动调度。增加或更换 Adobe 账号时，下游协议
+不需要修改。
+
+## 0. 当前支持范围
+
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| 文生图 | 支持 | 不传参考图字段 |
+| 图生图 | 支持 | 传 `image` 或 `images` 后自动切换 |
+| 参考图数量 | 1-4 张 | 超过 4 张返回 `400`，重复地址自动去重 |
+| 参考图来源 | URL / Data URL | 公开 HTTP(S) URL 或 `data:image/...;base64,...` |
+| 输出质量 | low / medium / high | 推荐通过 Public Model ID 后缀指定 |
+| 蒙版编辑 | 不支持 | 传蒙版字段会返回 `400` |
+| 多账号池 | 支持 | 下游不指定账号、映射或窗口 |
+
+图生图链路已用 `adobe-gpt-image2-low` 做过真实端到端验证，包括公共接口创建、
+参考图上传、Adobe 提交、状态轮询、结果下载和额度刷新。
+
 ## 1. 接口约定
 
 - Base URL：`http://127.0.0.1:8000`（跨机器调用时替换为实际服务地址）
@@ -16,6 +35,7 @@ Adobe Token、Cookie 或账号信息，只需要使用 fpbrowser2api 自己的 A
 - 模型列表：`GET /v1/models`
 - 内部任务类型：`adobe_image2_workflow`
 - 调用方式：异步创建，轮询到 `completed` 或 `failed`
+- 回调方式：当前不提供 webhook/callback，下游必须轮询状态接口
 
 `/v1/videos` 是项目现有的统一媒体兼容接口。虽然接口名是 `videos`，Adobe
 GPT Image 2 的完成结果仍然是图片，并通过 `image_url` 返回。
@@ -57,16 +77,50 @@ curl "http://127.0.0.1:8000/v1/models" \
 |---|---|---:|---|---|
 | `model` | string | 是 | - | 使用第 2 节中的 Public Model ID |
 | `prompt` | string | 是 | - | 图片提示词；正式生成时不能为空 |
-| `aspect_ratio` | string | 否 | `auto` | `auto`、`3:2`、`1:1`、`2:3` |
+| `aspect_ratio` | string | 否 | `auto` | `auto` 或第 3.1 节列出的固定比例 |
 | `quality` | string | 否 | 由模型决定 | `low`、`medium`、`high`；推荐直接用模型后缀选择 |
+| `image` | string/object | 否 | - | 单张参考图；可传公开 HTTP(S) URL 或 `data:image/...;base64,...` |
+| `images` | array | 否 | - | 多张参考图，最多 4 张；元素可为 URL 字符串或 `{ "url": "..." }` |
 | `dry_run` | boolean | 否 | `false` | 只检查会话和额度，不点击生成、不消耗生成额度 |
 
 注意：
 
 1. 推荐通过 `model` 后缀选择质量，不要同时传入相互冲突的 `model` 和 `quality`。
 2. Adobe 路由会把兼容字段 `duration` 固定为 `1`，下游可以不传。
-3. 当前只支持文生图，不接收参考图、蒙版或图生图字段。
-4. 生成消耗 Adobe 账号额度；实际扣减以 Adobe 页面显示为准。
+3. 没有参考图时执行文生图；存在一张或多张参考图时自动执行图生图，不需要更换模型。
+4. 单图兼容别名：`image_url`、`imageUrl`、`input_image`、`inputImage`、
+   `input_image_url`、`inputImageUrl`、`reference_image`、`referenceImage`、
+   `reference_image_url`、`referenceImageUrl`、`first_image_url`、`firstImageUrl`。
+5. 多图兼容别名：`image_urls`、`imageUrls`、`input_images`、`inputImages`、
+   `reference_images`、`referenceImages`、`reference_image_urls`、`referenceImageUrls`。
+6. 重复地址按首次出现顺序去重。每张图最大 30 MB，支持 AVIF、GIF、JPEG、PNG、WebP；
+   服务会校验 MIME、真实图片内容和尺寸。
+7. 外部 URL 必须是公开 HTTP(S) 地址，不能指向内网。本地生成结果可直接使用
+   `/public/adobe-image2-assets/...` 或 `/public/gpt-assets/...` 路径作为参考图。
+8. 当前不支持蒙版；传入 `mask`、`mask_image_url` 等字段会返回参数错误。
+9. 生成消耗 Adobe 账号额度；实际扣减以 Adobe 页面显示为准。
+
+### 3.1 支持的图片比例
+
+所有质量档位使用同一组比例：
+
+| Adobe 网站名称 | `aspect_ratio` |
+|---|---|
+| Auto | `auto` |
+| Cinematic banner | `8:1` |
+| Panorama | `4:1` |
+| Ultra Wide | `21:9` |
+| Widescreen | `16:9` |
+| Classic | `5:4` |
+| Landscape | `4:3` |
+| Wide | `3:2` |
+| Square | `1:1` |
+| Standard | `4:5` |
+| Portrait | `3:4` |
+| Tall | `2:3` |
+| Vertical | `9:16` |
+| Vertical banner | `1:4` |
+| Vertical strip | `1:8` |
 
 ## 4. 推荐接法：`/v1/videos`
 
@@ -105,7 +159,43 @@ curl -X POST "http://127.0.0.1:8000/v1/videos" \
 
 下游保存 `task_id`，不要等待创建请求直接返回图片。
 
-### 4.2 查询任务
+### 4.2 图生图创建任务
+
+传一张参考图：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/videos" \
+  -H "Authorization: Bearer YOUR_FPBROWSER2API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "adobe-gpt-image2-medium",
+    "prompt": "Keep the product shape and material, replace the background with a premium studio setting",
+    "aspect_ratio": "1:1",
+    "image": "https://cdn.example.com/input/product.png"
+  }'
+```
+
+传多张参考图：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/videos" \
+  -H "Authorization: Bearer YOUR_FPBROWSER2API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "adobe-gpt-image2-high",
+    "prompt": "Use the subject from the first image and the lighting style from the second image",
+    "aspect_ratio": "3:2",
+    "images": [
+      "https://cdn.example.com/input/subject.png",
+      {"url": "https://cdn.example.com/input/style.jpg"}
+    ]
+  }'
+```
+
+也可以把 `image` 换成完整的 `data:image/png;base64,...`。JSON 中的 base64 会显著增大
+请求体，生产环境更推荐使用可公开访问的对象存储 URL。
+
+### 4.3 查询任务
 
 ```bash
 curl "http://127.0.0.1:8000/v1/videos/TASK_ID" \
@@ -144,12 +234,12 @@ curl "http://127.0.0.1:8000/v1/videos/TASK_ID" \
   "success": true,
   "final": true,
   "model": "adobe-gpt-image2-medium",
-  "image_url": "http://127.0.0.1:8000/public/adobe-image2-assets/TASK_ID-0.png",
-  "url": "http://127.0.0.1:8000/public/adobe-image2-assets/TASK_ID-0.png",
+  "image_url": "/public/adobe-image2-assets/TASK_ID-0.png",
+  "url": "/public/adobe-image2-assets/TASK_ID-0.png",
   "video_url": null,
   "metadata": {
     "result_urls": [
-      "http://127.0.0.1:8000/public/adobe-image2-assets/TASK_ID-0.png"
+      "/public/adobe-image2-assets/TASK_ID-0.png"
     ]
   }
 }
@@ -162,10 +252,11 @@ curl "http://127.0.0.1:8000/v1/videos/TASK_ID" \
 3. `metadata.result_urls[0]`
 
 返回的是 fpbrowser2api 本地持久化后的公开图片地址，不需要携带 Adobe Cookie。
-跨机器部署时，确保响应中的服务主机名和 `/public/adobe-image2-assets/` 路径可被
-下游访问。
+当前响应通常是以 `/public/...` 开头的相对路径；下游必须使用请求时的 Base URL
+拼成绝对 URL，例如 `http://127.0.0.1:8000/public/adobe-image2-assets/TASK_ID-0.png`。
+跨机器部署时，确保该地址可被下游访问。
 
-### 4.3 失败结果
+### 4.4 失败结果
 
 ```json
 {
@@ -238,21 +329,38 @@ curl "http://127.0.0.1:8000/v1/tasks/TASK_ID" \
     "provider_model": "gpt-image@2",
     "quality": "medium",
     "aspect_ratio": "3:2",
-    "image_url": "http://127.0.0.1:8000/public/adobe-image2-assets/TASK_ID-0.png",
-    "url": "http://127.0.0.1:8000/public/adobe-image2-assets/TASK_ID-0.png",
+    "generation_mode": "image2image",
+    "reference_count": 1,
+    "image_url": "/public/adobe-image2-assets/TASK_ID-0.png",
+    "url": "/public/adobe-image2-assets/TASK_ID-0.png",
     "urls": [
-      "http://127.0.0.1:8000/public/adobe-image2-assets/TASK_ID-0.png"
+      "/public/adobe-image2-assets/TASK_ID-0.png"
     ],
     "remaining_quota": 3980
   }
 }
 ```
 
-生产调用不要传 `mapping_id`，让服务在所有已启用的 Adobe 窗口中调度。只有排查
-当前账号时才可临时在根对象加入 `"mapping_id": 68`；该编号属于当前部署环境，
-下游不能把它作为长期协议的一部分。
+生产调用不要传 `mapping_id` 或 `window_pk`，让服务在所有已启用的 Adobe 窗口中
+自动调度。这两个字段是内部管理标识，不属于下游透传协议；固定它们会绕过账号池，
+并在账号迁移或重新绑定后失效。
 
-## 6. Dry Run：检查账号和额度
+## 6. 多账号调度规则
+
+下游只需要传 Public Model ID，账号池调度由 fpbrowser2api 完成：
+
+1. `adobe-gpt-image2-*` 被路由到 `adobe_image2_workflow`。
+2. 服务从已启用、剩余额度可用、未处于错误冷却且有空闲并发的 Adobe 映射中选取窗口。
+3. 任务绑定窗口后，在该窗口的 Adobe 登录会话中执行；同一窗口登录的其他平台账号
+   不会参与 Adobe 任务，也不会被 Adobe 账号资料覆盖。
+4. 生成成功后，服务更新该 Adobe 映射的剩余额度，并把图片保存到本地公开资源目录。
+5. 某个 Adobe 账号被禁用、额度耗尽或登录失效时，下游请求格式不变；运维侧修复或
+   增加映射即可恢复容量。
+
+调度不保证账号粘性。下游不得假设连续两次请求会使用同一个 Adobe 账号，也不应
+根据内部窗口编号实现业务逻辑。
+
+## 7. Dry Run：检查账号和额度
 
 Dry Run 会打开已登录的 Adobe 页面并读取账号状态，但不会点击 Generate，也不会
 消耗生成额度。建议使用完整任务接口：
@@ -292,10 +400,11 @@ Dry Run 不要求 `prompt`。任务完成后的 `result` 示例：
 额度是创建任务时的快照。正式生成完成后，结果中的 `remaining_quota` 是服务再次
 读取 Adobe 页面得到的剩余额度。
 
-## 7. Python 下游示例
+## 8. Python 下游示例
 
 ```python
 import time
+from urllib.parse import urljoin
 
 import requests
 
@@ -313,6 +422,8 @@ created = requests.post(
         "model": "adobe-gpt-image2-medium",
         "prompt": "A premium studio product photograph of a red ceramic vase",
         "aspect_ratio": "3:2",
+        # 删除 image 即为文生图；保留 image 会自动切换为图生图。
+        "image": "https://cdn.example.com/input/vase.png",
     },
     timeout=30,
 )
@@ -334,7 +445,10 @@ while True:
             or task.get("url")
             or (task.get("metadata", {}).get("result_urls") or [None])[0]
         )
-        print(image_url)
+        if not image_url:
+            raise RuntimeError("completed task returned no image URL")
+        absolute_image_url = urljoin(f"{BASE_URL}/", image_url)
+        print(absolute_image_url)
         break
 
     if task["status"] == "failed":
@@ -343,7 +457,7 @@ while True:
     time.sleep(3)
 ```
 
-## 8. 常见 HTTP 错误
+## 9. 常见 HTTP 错误
 
 | HTTP 状态码 | 含义 | 下游处理建议 |
 |---:|---|---|
@@ -357,13 +471,28 @@ while True:
 任务创建成功后，即使 HTTP 查询为 `200`，仍需检查 JSON 中的 `status`；业务失败会
 以 `status: "failed"` 和 `error`/`error_message` 返回。
 
-## 9. 运行要求与下游建议
+## 10. 幂等、超时与重试
+
+创建接口当前不接收下游自定义幂等键。下游应遵循以下规则，避免重复消耗 Adobe
+额度：
+
+1. 收到创建响应后立即持久化 `task_id`，后续只轮询状态，不要重复创建。
+2. 已取得 `task_id` 时，任何查询超时都只重试 `GET`，不要再次调用创建接口。
+3. 创建请求发生连接中断且未取得 `task_id` 时，结果具有歧义；不要无条件自动重放，
+   应先根据下游自己的请求记录排查，或转人工确认。
+4. HTTP `429` 或 `503` 且服务明确没有返回 `task_id` 时，可以指数退避后有限重试。
+5. 业务状态已经是 `failed` 时，不要无限重试同一提示词；先记录错误原因。
+
+建议创建请求 HTTP 超时设置为 30 秒，状态查询超时设置为 10-30 秒，轮询间隔为
+2-5 秒。生成耗时不受创建请求 HTTP 超时限制。
+
+## 11. 运行要求与下游建议
 
 1. Adobe 对应指纹浏览器窗口必须保持启用，且 Firefly 登录会话有效。
 2. 下游只保存 fpbrowser2api API Key，不保存 Adobe Token、Cookie 或账号密码。
-3. 生产调用只使用 `adobe-gpt-image2-*` Public Model ID，不传 `mapping_id`。
+3. 生产调用只使用 `adobe-gpt-image2-*` Public Model ID，不传 `mapping_id` 或 `window_pk`。
 4. 创建接口配置 30 秒 HTTP 超时；生成过程通过状态接口异步轮询。
 5. 对 `429`、`500`、`503` 做有限次数退避重试，对业务 `failed` 不做无限重试。
 6. 完成后尽快把图片下载到下游自己的对象存储，避免长期依赖单台服务的本地文件。
 7. Adobe 账号扩容时新增并启用同任务类型的窗口映射即可，下游请求协议无需变化。
-
+8. 不要把 `mapping_id`、`window_pk`、Adobe Token、Cookie 或浏览器窗口编号写进下游配置。

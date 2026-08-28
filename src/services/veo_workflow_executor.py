@@ -2260,8 +2260,22 @@ VEO_I2V_MODEL_PORTRAIT_FL = "veo_3_1_i2v_s_fast_portrait_fl"
 # 与 flow2api generation_handler 中 veo_3_1_r2v_fast / veo_3_1_r2v_fast_portrait（Ingredients 多图）对齐
 VEO_R2V_MODEL_LANDSCAPE = "veo_3_1_r2v_fast_landscape"
 VEO_R2V_MODEL_PORTRAIT = "veo_3_1_r2v_fast_portrait"
-VEO_OMNI_MODEL_ALIASES = {"gemini-omni", "gemini_omni", "gemini-omni-flash", "veo-omni", "veoomni", "omni", "omni-flash", "abra"}
+VEO_OMNI_MODEL_ALIASES = {
+    "gemini-omni",
+    "gemini_omni",
+    "gemini-omni-flash",
+    "gemini-omni-1.1-flash",
+    "gemini-omni-1-1-flash",
+    "veo-omni",
+    "veoomni",
+    "omni",
+    "omni-flash",
+    "omni-1.1-flash",
+    "omni-1-1-flash",
+    "abra",
+}
 VEO_OMNI_ALLOWED_DURATIONS = {4, 6, 8, 10}
+VEO_OMNI_MAX_REFERENCE_IMAGES = 7
 VEO_3_1_FAST_MODEL_KEY = "veo_3_1_fast"
 VEO_3_1_LITE_MODEL_KEY = "veo_3_1_lite"
 VEO_3_1_QUALITY_MODEL_KEY = "veo_3_1_quality"
@@ -2369,25 +2383,44 @@ def _veo_omni_model_key(payload: Dict[str, Any], *, mode: str) -> str:
     raw = _veo_payload_model_text(payload)
     if raw.startswith("abra_"):
         want = "abra_r2v_" if str(mode or "").lower() == "r2v" else "abra_t2v_"
-        if raw.startswith(want):
+        if raw.startswith(want) and re.fullmatch(r"abra_(?:r2v|t2v)_(?:4|6|8|10)s(?:_360p)?", raw):
             return raw
     duration = _veo_video_duration_seconds(payload)
     if duration not in VEO_OMNI_ALLOWED_DURATIONS:
-        raise NonPenalizedTaskError("Gemini Omni Flash 仅支持 4/6/8/10 秒", status_code=400)
+        raise NonPenalizedTaskError("Omni 1.1 Flash 仅支持 4/6/8/10 秒", status_code=400)
     prefix = "abra_r2v" if str(mode or "").lower() == "r2v" else "abra_t2v"
-    return f"{prefix}_{duration}s"
+    return f"{prefix}_{duration}s{_veo_omni_resolution_suffix(payload)}"
 
 
-def _veo_collect_ingredients_image_urls(payload: Dict[str, Any]) -> List[str]:
-    """Ingredients（R2V）参考图 URL：来自 `Ingredients_images`（或 `ingredients_images`），与 flow2api r2v 一致最多 3 张。"""
+def _veo_omni_resolution_suffix(payload: Dict[str, Any]) -> str:
+    raw = str(
+        (payload or {}).get("video_resolution")
+        or (payload or {}).get("videoResolution")
+        or (payload or {}).get("veo_video_resolution")
+        or (payload or {}).get("veoVideoResolution")
+        or (payload or {}).get("resolution")
+        or ""
+    ).strip()
+    if not raw:
+        return ""
+    normalized = re.sub(r"[^a-z0-9]+", "", raw.lower())
+    if normalized in {"360", "360p", "videoresolution360p"}:
+        return "_360p"
+    if normalized in {"720", "720p", "videoresolution720p"}:
+        return ""
+    raise NonPenalizedTaskError("Omni 1.1 Flash 视频分辨率仅支持 360p/720p", status_code=400)
+
+
+def _veo_collect_ingredients_image_urls(payload: Dict[str, Any], *, max_count: int = 3) -> List[str]:
+    """Ingredients（R2V）参考图 URL；Veo 3.1 默认上限仍为 3 张。"""
     payload = payload or {}
     raw = payload.get("Ingredients_images")
     if raw is None:
         raw = payload.get("ingredients_images")
     if not isinstance(raw, list):
         return []
-    if len(raw) > 3:
-        raise NonPenalizedTaskError("Ingredients 模式最多支持 3 张参考图", status_code=400)
+    if len(raw) > max_count:
+        raise NonPenalizedTaskError(f"Ingredients 模式最多支持 {max_count} 张参考图", status_code=400)
     out: List[str] = []
     for it in raw:
         u = _veo_extract_url_from_image_item(it)
@@ -2415,11 +2448,15 @@ def _veo_collect_images_reference_urls(payload: Dict[str, Any], *, max_count: in
 
 
 def _veo_collect_omni_reference_image_urls(payload: Dict[str, Any]) -> List[str]:
-    """Gemini Omni Flash reference inputs: accept Ingredients_images, images, or first_image_url."""
-    out = _veo_collect_ingredients_image_urls(payload)
+    """Omni 1.1 Flash R2V references: accept Ingredients_images, images, or first_image_url."""
+    out = _veo_collect_ingredients_image_urls(payload, max_count=VEO_OMNI_MAX_REFERENCE_IMAGES)
     if out:
         return out
-    out = _veo_collect_images_reference_urls(payload, max_count=3, label="Gemini Omni Flash 参考图")
+    out = _veo_collect_images_reference_urls(
+        payload,
+        max_count=VEO_OMNI_MAX_REFERENCE_IMAGES,
+        label="Omni 1.1 Flash 参考图",
+    )
     if out:
         return out
     payload = payload or {}
@@ -2448,16 +2485,25 @@ def _veo_resolve_r2v_model(payload: Dict[str, Any]) -> tuple[str, str]:
     return VEO_R2V_MODEL_LANDSCAPE, VIDEO_ASPECT_RATIO_LANDSCAPE
 
 
-def _veo_resolve_i2v_model_key(payload: Dict[str, Any], aspect_ratio: str) -> str:
+def _veo_resolve_i2v_model_key(
+    payload: Dict[str, Any],
+    aspect_ratio: str,
+    *,
+    image_count: int = 1,
+) -> str:
     raw = _veo_payload_model_text(payload)
     if _veo_payload_uses_omni(payload):
-        # Flow's public page exposes Omni-specific keys for T2V/R2V, but the
-        # start-image endpoint continues to accept the standard Veo 3.1 I2V
-        # keys. This keeps `images` / `first_image_url` on the start-image
-        # path instead of the slower Ingredients R2V path.
-        if aspect_ratio == VIDEO_ASPECT_RATIO_PORTRAIT:
-            return VEO_I2V_MODEL_PORTRAIT_FL
-        return VEO_I2V_MODEL_LANDSCAPE_FL
+        duration = _veo_video_duration_seconds(payload)
+        if duration not in VEO_OMNI_ALLOWED_DURATIONS:
+            raise NonPenalizedTaskError("Omni 1.1 Flash 仅支持 4/6/8/10 秒", status_code=400)
+        suffix = _veo_omni_resolution_suffix(payload)
+        if image_count >= 2:
+            if re.fullmatch(r"omni_flash_i2v_(?:4|6|8|10)s_first_last(?:_360p)?", raw):
+                return raw
+            return f"omni_flash_i2v_{duration}s_first_last{suffix}"
+        if re.fullmatch(r"abra_i2v_(?:4|6|8|10)s(?:_360p)?", raw):
+            return raw
+        return f"abra_i2v_{duration}s{suffix}"
     if raw.startswith("veo_3_1_i2v_"):
         return raw
     if "i2v" in raw and "portrait" in raw:
@@ -2506,6 +2552,52 @@ def _veo_collect_i2v_image_urls(payload: Dict[str, Any]) -> List[str]:
     if last:
         urls.append(last)
     return urls
+
+
+def _veo_payload_explicit_r2v(payload: Dict[str, Any]) -> bool:
+    mode = str(
+        payload.get("video_type")
+        or payload.get("veo_video_type")
+        or payload.get("video_mode")
+        or payload.get("reference_mode")
+        or ""
+    ).strip().lower()
+    return mode in {
+        "r2v",
+        "reference_to_video",
+        "reference-to-video",
+        "ingredients",
+        "ingredients_to_video",
+        "ingredients-to-video",
+        "reference_images",
+    }
+
+
+def _veo_payload_has_ingredients_images(payload: Dict[str, Any]) -> bool:
+    raw = (payload or {}).get("Ingredients_images")
+    if raw is None:
+        raw = (payload or {}).get("ingredients_images")
+    return isinstance(raw, list) and len(raw) > 0
+
+
+def _veo_resolve_video_input_urls(payload: Dict[str, Any], *, omni_mode: bool) -> tuple[List[str], List[str]]:
+    """Return `(ingredients_urls, i2v_urls)` with unambiguous Omni input routing."""
+    if omni_mode:
+        use_references = _veo_payload_has_ingredients_images(payload) or _veo_payload_explicit_r2v(payload)
+        ingredients_urls = _veo_collect_omni_reference_image_urls(payload) if use_references else []
+    else:
+        ingredients_urls = _veo_collect_ingredients_image_urls(payload)
+    if ingredients_urls:
+        return ingredients_urls, []
+    if not _veo_payload_looks_like_i2v(payload):
+        return [], []
+    i2v_urls = _veo_collect_i2v_image_urls(payload)
+    if not i2v_urls:
+        raise NonPenalizedTaskError(
+            "图生视频需要提供 1-2 张图片（first_image_url / image_url / images 等）",
+            status_code=400,
+        )
+    return [], i2v_urls
 
 
 def _veo_collect_image_generation_reference_urls(payload: Dict[str, Any]) -> List[str]:
@@ -3526,7 +3618,8 @@ async def veo_workflow(
     - 视频：`n_frames`（或 duration / duration_frames / 时长）经 `_pick_n_frames` 归一后 **>1**（如 300/450）
       时走文生视频 / 图生视频 / **Ingredients（R2V）多图**：若 `Ingredients_images`（或 `ingredients_images`）
       含至少 1 张可解析地址则走 `batchAsyncGenerateVideoReferenceImages`，模型与 flow2api
-      `veo_3_1_r2v_fast` / `veo_3_1_r2v_fast_portrait` 一致，最多 3 张；否则再按首尾帧图判断 I2V 或 T2V。
+      `veo_3_1_r2v_fast` / `veo_3_1_r2v_fast_portrait` 一致；Veo 3.1 最多 3 张，Omni 1.1
+      Flash 最多 7 张。Omni 的首帧/尾帧字段使用原生 I2V 模型键。
       轮询 `batchCheckAsyncVideoGenerationStatus`。
     - 图片：当上述字段 **显式为 1** 时走文生图 / 图生图：`flow/uploadImage`（图生图仅首张）
       + `projects/{id}/flowMedia:batchGenerateImages`；默认模型 NARWHAL，`use_gem_pix_2`（或 `image_model_name`=`GEM_PIX_2`）时用 GEM_PIX_2（与 flow2api 一致）。
@@ -3548,31 +3641,11 @@ async def veo_workflow(
     omni_mode = _veo_payload_uses_omni(payload)
 
     ingredients_urls: List[str] = []
-    want_ingredients = False
-    if not image_mode:
-        if omni_mode and not _veo_payload_explicit_i2v(payload):
-            ingredients_urls = _veo_collect_omni_reference_image_urls(payload)
-        else:
-            ingredients_urls = _veo_collect_ingredients_image_urls(payload)
-        want_ingredients = len(ingredients_urls) >= 1
-        #raise NonPenalizedTaskError("Veo3.1视频维护中，暂时下架", status_code=400,content_violation=True)
-
-    want_i2v = False
-    if not image_mode:
-        want_i2v = (not want_ingredients) and _veo_payload_looks_like_i2v(payload)
-    if want_ingredients:
-        want_i2v = False
-
     i2v_urls: List[str] = []
-    if want_i2v:
-        i2v_urls = _veo_collect_i2v_image_urls(payload)
-        if len(i2v_urls) == 0:
-            raise NonPenalizedTaskError(
-                "图生图需要提供至少一张参考图（first_image_url / image_url / images 等）"
-                if image_mode
-                else "图生视频需要提供 1-2 张图片（first_image_url / image_url / images 等）",
-                status_code=400,
-            )
+    if not image_mode:
+        ingredients_urls, i2v_urls = _veo_resolve_video_input_urls(payload, omni_mode=omni_mode)
+    want_ingredients = bool(ingredients_urls)
+    want_i2v = bool(i2v_urls)
 
     labs_hint = str(payload.get("veo_url") or payload.get("target_url") or "").strip() or "https://labs.google/fx"
     project_id = str(
@@ -3757,7 +3830,11 @@ async def veo_workflow(
                 _ext_model_key, _ext_video_aspect = _veo_resolve_r2v_model(payload)
             elif want_i2v:
                 _ext_video_aspect = _veo_resolve_i2v_aspect_ratio(payload)
-                _ext_model_key = _veo_resolve_i2v_model_key(payload, _ext_video_aspect)
+                _ext_model_key = _veo_resolve_i2v_model_key(
+                    payload,
+                    _ext_video_aspect,
+                    image_count=len(i2v_urls),
+                )
             else:
                 _ext_model_key, _ext_video_aspect = _veo_resolve_t2v_model(payload)
             _ext_image_aspect = None

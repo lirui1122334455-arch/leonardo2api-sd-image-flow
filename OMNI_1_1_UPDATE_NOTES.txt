@@ -1,0 +1,29 @@
+Omni 1.1 Flash - fpbrowser2api update
+Date: 2026-08-28
+
+This package updates the fpbrowser2api server only.
+The fingerprint-browser Flow extension does not need to be replaced.
+
+Files to replace with the same relative paths:
+  src/api/routes.py
+  src/services/veo_workflow_executor.py
+
+Optional files:
+  FLOW_OMNI_1_1_PASSTHROUGH_API.md
+  static/test.html
+  README.md
+  tests/test_veo_omni_models.py
+
+Deployment:
+  1. Back up the existing files on the target computer.
+  2. Extract this archive at the fpbrowser2api repository root.
+  3. Run:
+       .\.venv\Scripts\python.exe -m unittest tests.test_veo_omni_models -v
+  4. Wait until active generation tasks finish, then restart fpbrowser2api.
+
+Behavior after update:
+  - model aliases include omni-1.1-flash
+  - one frame uses abra_i2v_{4|6|8|10}s
+  - first + last frames use omni_flash_i2v_{4|6|8|10}s_first_last
+  - Omni Ingredients supports up to 7 images
+  - Omni video resolution supports 360p and 720p

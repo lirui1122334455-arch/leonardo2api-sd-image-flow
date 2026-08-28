@@ -97,6 +97,20 @@ class CreateVideoRequest(BaseModel):
     model_config = {"extra": "allow"}
 
 
+GEMINI_OMNI_PUBLIC_MODELS = (
+    "gemini-omni",
+    "gemini-omni-flash",
+    "gemini-omni-1.1-flash",
+    "gemini-omni-1-1-flash",
+    "veo-omni",
+    "veoomni",
+    "VEOomni",
+    "omni-flash",
+    "omni-1.1-flash",
+    "omni-1-1-flash",
+)
+
+
 OPENAI_COMPAT_VIDEO_MODELS = (
     "seedance-2",
     "seedance-2-fast",
@@ -115,12 +129,7 @@ OPENAI_COMPAT_VIDEO_MODELS = (
     "veo-3-1-lite",
     "veo-3-1-fast",
     "veo-3-1-quality",
-    "gemini-omni",
-    "gemini-omni-flash",
-    "veo-omni",
-    "veoomni",
-    "VEOomni",
-    "omni-flash",
+    *GEMINI_OMNI_PUBLIC_MODELS,
     "gpt-image-2",
     "gpt-image2-1k",
     "gpt-image2-2k",
@@ -129,7 +138,7 @@ OPENAI_COMPAT_VIDEO_MODELS = (
 )
 OPENAI_COMPAT_VIDEO_MODEL_SET = set(OPENAI_COMPAT_VIDEO_MODELS)
 OPENAI_COMPAT_VIDEO_MODEL_KEY_SET = {m.lower() for m in OPENAI_COMPAT_VIDEO_MODELS}
-GEMINI_OMNI_VIDEO_MODEL_SET = {"gemini-omni", "gemini-omni-flash", "veo-omni", "veoomni", "omni-flash"}
+GEMINI_OMNI_VIDEO_MODEL_SET = {m.lower() for m in GEMINI_OMNI_PUBLIC_MODELS}
 VEO31_VIDEO_MODEL_KEYS: Dict[str, str] = {
     "veo-3-1": "veo_3_1_fast",
     "veo-3-1-fast": "veo_3_1_fast",
@@ -665,7 +674,7 @@ def _normalize_video_task_payload(payload: Dict[str, Any]) -> tuple[str, Dict[st
         payload["duration"] = 8
         payload["n_frames"] = 240
         payload["videoModelKey"] = VEO31_VIDEO_MODEL_KEYS[model_key]
-    elif model_key in GEMINI_OMNI_VIDEO_MODEL_SET:
+    elif re.sub(r"[\s_]+", "-", model_key) in GEMINI_OMNI_VIDEO_MODEL_SET:
         task_type_code = "veo_workflow"
         duration = payload.get("duration")
         if duration is None:
@@ -674,9 +683,9 @@ def _normalize_video_task_payload(payload: Dict[str, Any]) -> tuple[str, Dict[st
         try:
             duration_i = int(duration)
         except Exception:
-            raise HTTPException(status_code=400, detail="gemini-omni duration must be one of 4, 6, 8, 10")
+            raise HTTPException(status_code=400, detail="Omni 1.1 Flash duration must be one of 4, 6, 8, 10")
         if duration_i not in {4, 6, 8, 10}:
-            raise HTTPException(status_code=400, detail="gemini-omni only supports duration=4, 6, 8, or 10")
+            raise HTTPException(status_code=400, detail="Omni 1.1 Flash only supports duration=4, 6, 8, or 10")
         payload["duration"] = duration_i
         payload["model"] = "gemini-omni"
     elif model_key in ADOBE_IMAGE2_PUBLIC_MODEL_ALIASES:

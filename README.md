@@ -470,23 +470,46 @@ curl -X POST https://xxx.xxx.xxx/v1/videos \
   }'
 ```
 
-### 3.7 VEOomni / Gemini Omni Flash
+### 3.7 Omni 1.1 Flash（素材生视频）
 
 ```bash
 curl -X POST https://xxx.xxx.xxx/v1/videos \
   -H "Authorization: Bearer api-key" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "VEOomni",
+    "model": "omni-1.1-flash",
     "prompt": "a cinematic product reveal using these references",
     "duration": 8,
     "aspect_ratio": "16:9",
-    "images": [
+    "Ingredients_images": [
       "https://your-cdn.com/ref-1.jpg",
       "https://your-cdn.com/ref-2.jpg"
     ]
   }'
 ```
+
+Omni 1.1 Flash 的 `Ingredients_images` 最多支持 7 张。也可使用 `video_mode: "r2v"`
+将 `images` 明确指定为素材参考图。
+
+### 3.8 Omni 1.1 Flash（首尾帧图生视频）
+
+```bash
+curl -X POST https://xxx.xxx.xxx/v1/videos \
+  -H "Authorization: Bearer api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "omni-1.1-flash",
+    "prompt": "move naturally from the opening frame to the ending frame",
+    "duration": 8,
+    "aspect_ratio": "16:9",
+    "resolution": "720p",
+    "first_image_url": "https://your-cdn.com/first.jpg",
+    "last_image_url": "https://your-cdn.com/last.jpg"
+  }'
+```
+
+只传 `first_image_url` 时使用 Omni 单首帧图生视频；同时传入 `last_image_url`
+时使用首尾帧模式。`images` 也可按 `[first, last]` 顺序传入 1-2 张图片。
 
 ## 4. 图片模型示例
 
@@ -558,16 +581,17 @@ curl -X POST https://xxx.xxx.xxx/v1/videos \
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `model` | string | ✅ | `seedance-2` / `veo-3-1-lite` / `veo-3-1-fast` / `veo-3-1-quality` / `veo-3-1` / `VEOomni` / `gemini-omni` / `veo-omni` / `nana-banana-2` / `nana-banana-pro` |
+| `model` | string | ✅ | `seedance-2` / `veo-3-1-lite` / `veo-3-1-fast` / `veo-3-1-quality` / `veo-3-1` / `omni-1.1-flash` / `VEOomni` / `gemini-omni` / `veo-omni` / `nana-banana-2` / `nana-banana-pro` |
 | `prompt` | string | ✅ | 生成提示词 |
-| `duration` | int | 视频必填 | `seedance-2` 支持 `10` / `15`；Veo 3.1 Lite/Fast/Quality 固定传 `8`；`VEOomni` / `gemini-omni` 支持 `4` / `6` / `8` / `10` |
+| `duration` | int | 视频必填 | `seedance-2` 支持 `10` / `15`；Veo 3.1 Lite/Fast/Quality 固定传 `8`；Omni 1.1 Flash 支持 `4` / `6` / `8` / `10` |
 | `aspect_ratio` | string | ❌ | 视频常用 `16:9` / `9:16`；图片支持 `1:1` / `4:3` / `3:4` / `16:9` / `9:16` |
-| `resolution` | string | ❌ | `seedance-2` 支持 `480p` / `720p` / `1080p`；图片支持 `1k` / `2k` |
-| `images` | array | ❌ | 参考图 URL 数组。Seedance 多参考图最多 9 张；VEO 首尾帧最多 2 张；Nana Banana 图片最多 10 张 |
+| `resolution` | string | ❌ | `seedance-2` 支持 `480p` / `720p` / `1080p`；Omni 1.1 Flash 视频支持 `360p` / `720p`；图片支持 `1k` / `2k` |
+| `images` | array | ❌ | 参考图 URL 数组。Seedance 多参考图最多 9 张；VEO/Omni 图生视频按 `[first, last]` 传入 1-2 张；Nana Banana 图片最多 10 张 |
 | `first_image_url` | string | ❌ | 首帧或单参考图 URL |
 | `last_image_url` | string | ❌ | 尾帧 URL |
+| `video_mode` | string | ❌ | Omni 可显式传 `i2v` 或 `r2v`；未传时首尾帧字段默认走 I2V，`Ingredients_images` 默认走 R2V |
 | `function_mode` | string | ❌ | `seedance-2` 可用：`first_last_frames` / `omni_reference` |
-| `Ingredients_images` | array | ❌ | `veo-3-1` 多参考图视频使用，最多 3 张 |
+| `Ingredients_images` | array | ❌ | 多参考图视频：`veo-3-1` 最多 3 张，Omni 1.1 Flash 最多 7 张 |
 
 ## 6. 响应字段
 
