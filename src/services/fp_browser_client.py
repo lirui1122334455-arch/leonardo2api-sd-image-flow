@@ -111,8 +111,9 @@ class FPBrowserClient:
         - 老版本常用参数名为 proxies
         """
         # 说明：显式拆分超时，避免某些版本/场景下默认值不生效导致“无限等待”
+        # 指纹浏览器 API 是本机/局域网接口，不应继承 HTTP_PROXY，否则 127.0.0.1 也会被转发到系统代理并返回 502。
         timeout = httpx.Timeout(connect=15.0, read=60.0, write=30.0, pool=30.0)
-        return httpx.AsyncClient(timeout=timeout)
+        return httpx.AsyncClient(timeout=timeout, trust_env=False)
 
     async def list_windows(
         self,

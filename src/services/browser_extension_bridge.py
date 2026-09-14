@@ -7,17 +7,21 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
+import ipaddress
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
 
 from ..core.config import config
 from ..core.logger import logger
 from .task_executor_types import NonPenalizedTaskError, ProgressCB
+from .reference_image_fetcher import ReferenceImageFetchError, download_reference_image
 
 
 router = APIRouter()
@@ -46,6 +50,10 @@ _clients: Dict[str, ExtensionClient] = {}
 _clients_by_id: Dict[str, ExtensionClient] = {}
 _clients_lock = asyncio.Lock()
 _PING_INTERVAL_SECONDS = 20.0
+
+
+class ExtensionReferenceImageRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=8192)
 
 
 def _client_key(space_id: str, window_key: str) -> str:
@@ -306,3 +314,38 @@ async def list_extension_clients():
                 for c in _clients.values()
             ],
         }
+
+
+def _verify_extension_http_request(request: Request) -> None:
+    expected = str(config.extension_bridge_token or "")
+    supplied = str(request.headers.get("x-extension-token") or "")
+    if expected:
+        if not hmac.compare_digest(supplied, expected):
+            raise HTTPException(status_code=403, detail="invalid extension token")
+        return
+
+    peer = str(request.client.host if request.client else "").strip()
+    try:
+        is_loopback = ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        is_loopback = peer.lower() == "localhost"
+    if not is_loopback:
+        raise HTTPException(status_code=403, detail="extension reference proxy is local-only")
+
+
+@router.post("/api/extension/reference-image")
+async def fetch_extension_reference_image(body: ExtensionReferenceImageRequest, request: Request):
+    _verify_extension_http_request(request)
+    try:
+        data, media_type = await download_reference_image(body.url)
+    except ReferenceImageFetchError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": 'inline; filename="reference-image"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )

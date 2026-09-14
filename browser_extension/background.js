@@ -70,6 +70,46 @@ async function send(obj) {
   ws.send(JSON.stringify(obj));
 }
 
+function bridgeHttpEndpoint(bridgeUrl, path) {
+  const url = new URL(String(bridgeUrl || ""));
+  if (url.protocol === "ws:") url.protocol = "http:";
+  else if (url.protocol === "wss:") url.protocol = "https:";
+  else throw new Error("invalid extension bridge URL");
+  url.pathname = path;
+  url.search = "";
+  url.hash = "";
+  return url.href;
+}
+
+async function fetchReferenceBlobFromBackend(ref) {
+  const cfg = await getConfig();
+  const endpoint = bridgeHttpEndpoint(cfg.bridgeUrl, "/api/extension/reference-image");
+  const headers = { "Content-Type": "application/json", "Accept": "image/*" };
+  if (cfg.bridgeToken) headers["X-Extension-Token"] = cfg.bridgeToken;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60000);
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ url: String(ref || "") }),
+      signal: controller.signal,
+      credentials: "omit"
+    });
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 240);
+      throw new Error(`backend reference fetch HTTP ${response.status}: ${detail}`);
+    }
+    const blob = await response.blob();
+    if (!blob.size || !String(blob.type || "").toLowerCase().startsWith("image/")) {
+      throw new Error("backend reference fetch returned invalid image data");
+    }
+    return blob;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function stopHeartbeat() {
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
@@ -264,7 +304,8 @@ async function runTask(msg) {
     progress: async (progress, data = {}) => {
       await pushLog("debug", "task.progress", { task_id: taskId, progress, data });
       await send({ type: "task.progress", task_id: taskId, progress, data });
-    }
+    },
+    fetchReferenceBlob: fetchReferenceBlobFromBackend
   };
   let result;
   if (msg.provider === "veo") {

@@ -12,6 +12,10 @@ const GPT_IMAGE2_PUBLIC_MODELS = {
 const GPT_IMAGE2_MIN_PIXELS = 655360;
 const GPT_IMAGE2_MAX_PIXELS = 8294400;
 const GPT_IMAGE2_MAX_EDGE = 3840;
+const GPT_IMAGE2_DIRECT_BLOCK_KEY = "gpt_image2_direct_blocked_until";
+const GPT_IMAGE2_DIRECT_BLOCK_MS = 30 * 60 * 1000;
+const NETWORK_RETRY_DELAYS_MS = [500, 1500, 3000];
+const REQUIREMENTS_RETRY_STATUSES = [408, 425, 429, 500, 502, 503, 504];
 const GPT_IMAGE2_SIZE_TABLE = {
   "1k": {
     "1:1": "1024x1024", "3:2": "1216x832", "2:3": "832x1216", "4:3": "1152x864", "3:4": "864x1152",
@@ -79,25 +83,52 @@ async function ensureGptTab(targetUrl = CHATGPT) {
   return tab.id;
 }
 
-async function pageFetch(tabId, url, { method = "GET", headers = {}, body = null } = {}) {
-  const frames = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
-    args: [url, { method, headers, body }],
-    func: async (u, opts) => {
-      const init = { method: opts.method || "GET", headers: opts.headers || {}, credentials: "include" };
-      if (opts.body !== null && opts.body !== undefined) init.body = JSON.stringify(opts.body);
-      const r = await fetch(u, init);
-      const text = await r.text();
-      const hdrs = {};
-      try { for (const [k, v] of r.headers.entries()) hdrs[k] = v; } catch (_) {}
-      let json = null; try { json = text ? JSON.parse(text) : null; } catch (_) {}
-      return { status: r.status, headers: hdrs, text, json, url: r.url };
+function isTransientFetchError(error) {
+  return /failed to fetch|networkerror|load failed|error page|err_|no frame with id/i.test(String(error && error.message || error || ""));
+}
+
+async function pageFetch(tabId, url, {
+  method = "GET",
+  headers = {},
+  body = null,
+  networkRetries = 0,
+  retryStatuses = []
+} = {}) {
+  const retryStatusSet = new Set(retryStatuses || []);
+  const attempts = Math.max(1, Number(networkRetries || 0) + 1);
+  let lastError = null;
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const frames = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        args: [url, { method, headers, body }],
+        func: async (u, opts) => {
+          const init = { method: opts.method || "GET", headers: opts.headers || {}, credentials: "include" };
+          if (opts.body !== null && opts.body !== undefined) init.body = JSON.stringify(opts.body);
+          const r = await fetch(u, init);
+          const text = await r.text();
+          const hdrs = {};
+          try { for (const [k, v] of r.headers.entries()) hdrs[k] = v; } catch (_) {}
+          let json = null; try { json = text ? JSON.parse(text) : null; } catch (_) {}
+          return { status: r.status, headers: hdrs, text, json, url: r.url };
+        }
+      });
+      const res = Array.isArray(frames) && frames[0] ? frames[0].result : null;
+      if (!res) throw new Error(`GPT pageFetch returned empty result for ${url}`);
+      if (attempt + 1 < attempts && retryStatusSet.has(Number(res.status || 0))) {
+        await sleep(NETWORK_RETRY_DELAYS_MS[Math.min(attempt, NETWORK_RETRY_DELAYS_MS.length - 1)]);
+        continue;
+      }
+      return res;
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 >= attempts || !isTransientFetchError(error)) throw error;
+      await sleep(NETWORK_RETRY_DELAYS_MS[Math.min(attempt, NETWORK_RETRY_DELAYS_MS.length - 1)]);
     }
-  });
-  const res = Array.isArray(frames) && frames[0] ? frames[0].result : null;
-  if (!res) throw new Error(`GPT pageFetch returned empty result for ${url}`);
-  return res;
+  }
+  throw lastError || new Error(`GPT pageFetch failed for ${url}`);
 }
 
 function gptHeaders(token, path = "/", accept = "application/json") {
@@ -138,7 +169,11 @@ function gptHeaders(token, path = "/", accept = "application/json") {
 
 async function getAccessToken(tabId, targetUrl) {
   const origin = originFromTarget(targetUrl);
-  const r = await pageFetch(tabId, `${origin}/api/auth/session`, { headers: { "Accept": "application/json" } });
+  const r = await pageFetch(tabId, `${origin}/api/auth/session`, {
+    headers: { "Accept": "application/json" },
+    networkRetries: 2,
+    retryStatuses: REQUIREMENTS_RETRY_STATUSES
+  });
   const j = r && r.json || {};
   const tok = j.accessToken || j.access_token || j.token;
   if (!tok) throw new Error(`GPT access token not found: ${JSON.stringify(j).slice(0, 240)}`);
@@ -314,11 +349,22 @@ function buildProofToken(seed, difficulty, userAgent = WEB_USER_AGENT) {
 
 async function requirements(tabId, token) {
   const path = "/backend-api/sentinel/chat-requirements";
-  const r = await pageFetch(tabId, CHATGPT + path, {
-    method: "POST",
-    headers: gptHeaders(token, path),
-    body: { p: buildLegacyRequirementsToken() }
-  });
+  let r;
+  try {
+    r = await pageFetch(tabId, CHATGPT + path, {
+      method: "POST",
+      headers: gptHeaders(token, path),
+      body: { p: buildLegacyRequirementsToken() },
+      networkRetries: 3,
+      retryStatuses: REQUIREMENTS_RETRY_STATUSES
+    });
+  } catch (error) {
+    const out = new Error(`chat-requirements network failure after retries: ${String(error && error.message || error || "unknown error")}`);
+    out.stage = "requirements";
+    out.status_code = 502;
+    out.retryable = true;
+    throw out;
+  }
   if (!r || r.status >= 400) throw new Error(`chat-requirements failed HTTP ${r && r.status}: ${(r && r.text || "").slice(0, 500)}`);
   const j = r.json || {};
   if (j.arkose && j.arkose.required) throw new Error("GPT chat-requirements requires arkose");
@@ -375,12 +421,22 @@ function dataUrlToBlob(dataUrl) {
   return new Blob([arr], { type: mime });
 }
 
-async function downloadRefBlob(ref) {
+async function downloadRefBlob(ref, runtime, index) {
   if (!ref) throw new Error("empty reference image");
   if (String(ref).startsWith("data:")) return dataUrlToBlob(ref);
-  const r = await fetch(ref, { credentials: "omit" });
-  if (!r.ok) throw new Error(`reference image download HTTP ${r.status}: ${(await r.text()).slice(0, 160)}`);
-  return await r.blob();
+  try {
+    const r = await fetch(ref, { credentials: "omit" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 160)}`);
+    return await r.blob();
+  } catch (directError) {
+    if (!runtime || typeof runtime.fetchReferenceBlob !== "function") throw directError;
+    await runtime.progress(7, {
+      stage: "upload_reference_download_fallback",
+      index: index + 1,
+      reason: String(directError && directError.message || directError || "direct fetch failed").slice(0, 180)
+    });
+    return await runtime.fetchReferenceBlob(ref);
+  }
 }
 
 async function imageDimensions(blob) {
@@ -421,7 +477,18 @@ async function processUploadStream(tabId, token, fileId, fileName) {
 }
 
 async function uploadImage(tabId, token, ref, index, runtime) {
-  const blob = await downloadRefBlob(ref);
+  await runtime.progress(7, { stage: "upload_reference_download", index: index + 1 });
+  let blob;
+  try {
+    blob = await downloadRefBlob(ref, runtime, index);
+  } catch (error) {
+    const out = new Error(`reference image download failed: ${String(error && error.message || error || "unknown error")}`);
+    out.stage = "upload_reference_download";
+    out.status_code = Number(error && error.status_code || 502);
+    out.submitted = false;
+    out.retryable = error && error.retryable !== false;
+    throw out;
+  }
   const fileName = `image_${index + 1}.${(blob.type || "image/png").includes("jpeg") ? "jpg" : "png"}`;
   const path = "/backend-api/files";
   const dims = await imageDimensions(blob);
@@ -675,6 +742,25 @@ function image2Body(payload, prompt, refs, size) {
 function shouldRetryImage2WithoutToolChoice(text) {
   const s = String(text || "").toLowerCase();
   return s.includes("tool choice") && s.includes("image_generation") && s.includes("not found") && s.includes("tools");
+}
+
+function isImage2DirectAuthError(error) {
+  return /HTTP\s+(401|403)\b|Unauthorized|Forbidden/i.test(String(error && error.message || error || ""));
+}
+
+async function image2DirectIsBlocked() {
+  try {
+    const got = await chrome.storage.local.get([GPT_IMAGE2_DIRECT_BLOCK_KEY]);
+    return Number(got[GPT_IMAGE2_DIRECT_BLOCK_KEY] || 0) > Date.now();
+  } catch (_) {
+    return false;
+  }
+}
+
+async function blockImage2DirectTemporarily() {
+  try {
+    await chrome.storage.local.set({ [GPT_IMAGE2_DIRECT_BLOCK_KEY]: Date.now() + GPT_IMAGE2_DIRECT_BLOCK_MS });
+  } catch (_) {}
 }
 
 async function runImage2Workflow(tabId, token, payload, runtime) {
@@ -1119,12 +1205,22 @@ export async function runGptTask(msg, runtime) {
 
   const kind = (p.workflow_kind || "").toLowerCase().includes("video") ? "video" : "image";
   if (kind === "image" && isImage2Payload(p)) {
+    const fallbackAllowed = p.image2_fallback !== false && p.direct_only !== true;
+    if (fallbackAllowed && await image2DirectIsBlocked()) {
+      await runtime.progress(5, {
+        stage: "image2_direct_bypassed",
+        reason: "direct endpoint recently rejected browser-session authentication"
+      });
+      return await runConversationWorkflow(tabId, token, p, "image", runtime);
+    }
     try {
       return await runImage2Workflow(tabId, token, p, runtime);
     } catch (e) {
       const msg = String((e && e.message) || e || "");
-      const canFallback = /HTTP\s+(401|403)\b|Unauthorized|Forbidden/i.test(msg) && p.image2_fallback !== false && p.direct_only !== true;
+      const authRejected = isImage2DirectAuthError(e);
+      const canFallback = authRejected && fallbackAllowed;
       if (!canFallback) throw e;
+      await blockImage2DirectTemporarily();
       await runtime.progress(12, { stage: "image2_fallback_conversation", reason: msg.slice(0, 220) });
       return await runConversationWorkflow(tabId, token, p, "image", runtime);
     }
